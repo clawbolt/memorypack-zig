@@ -1,0 +1,26 @@
+# Zig build output
+.zig-cache/
+zig-cache/
+zig-out/
+
+# .NET build output
+interop/csharp/bin/
+interop/csharp/obj/
+
+# Editor and OS metadata
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Local environment and secrets
+.env
+.env.*
+*.pem
+*.p12
+*.key
+credentials.json
+
+# Generated cross-language output; golden vectors remain tracked.
+interop/zig_vectors/
