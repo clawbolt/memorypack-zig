@@ -2,6 +2,7 @@ using System.Text;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Collections.ObjectModel;
 using MemoryPack;
 
 Directory.CreateDirectory("interop/vectors");
@@ -209,6 +210,20 @@ public static void GenerateVectors()
     Write("hash_set.bin", new HashSet<int> { 5, 6, 7 });
     Write("ignore.bin", new IgnoreObject { Kept = 7, Ignored = 99 });
     Write("include.bin", new IncludeObject(7, 11));
+    Write("array_3d.bin", new[,,] { { { 1, 2 }, { 3, 4 } }, { { 5, 6 }, { 7, 8 } } });
+    Write("tuple3.bin", (7, "seven", true));
+    Write("tuple4.bin", (7, "seven", true, 1.5f));
+    Write("date_only.bin", new DateOnly(2023, 4, 5));
+    Write("time_only.bin", new TimeOnly(6, 7, 8));
+    Write("linked_list.bin", new LinkedList<int>(new[] { 5, 6, 7 }));
+    Write("queue.bin", new Queue<int>(new[] { 5, 6, 7 }));
+    var stack = new Stack<int>();
+    stack.Push(5);
+    stack.Push(6);
+    stack.Push(7);
+    Write("stack.bin", stack);
+    Write("sorted_dictionary.bin", new SortedDictionary<int, string> { [1] = "one", [2] = "two" });
+    Write("read_only_collection.bin", new ReadOnlyCollection<int>(new[] { 5, 6, 7 }));
 }
 
 public static void VerifyZigVectors()
@@ -266,6 +281,16 @@ public static void VerifyZigVectors()
     Verify("hash_set.bin", new HashSet<int> { 5, 6, 7 }, strictBytes: false);
     Verify("ignore.bin", new IgnoreObject { Kept = 7, Ignored = 0 });
     Verify("include.bin", new IncludeObject(7, 11));
+    Verify("array_3d.bin", new[,,] { { { 1, 2 }, { 3, 4 } }, { { 5, 6 }, { 7, 8 } } });
+    Verify("tuple3.bin", (7, "seven", true));
+    Verify("tuple4.bin", (7, "seven", true, 1.5f));
+    Verify("date_only.bin", new DateOnly(2023, 4, 5));
+    Verify("time_only.bin", new TimeOnly(6, 7, 8));
+    Verify("linked_list.bin", new LinkedList<int>(new[] { 5, 6, 7 }));
+    Verify("queue.bin", new Queue<int>(new[] { 5, 6, 7 }));
+    Verify("stack.bin", new Stack<int>(new[] { 5, 6, 7 }), strictBytes: false);
+    Verify("sorted_dictionary.bin", new SortedDictionary<int, string> { [1] = "one", [2] = "two" }, strictBytes: false);
+    Verify("read_only_collection.bin", new ReadOnlyCollection<int>(new[] { 5, 6, 7 }));
 }
 
 static void Write<T>(string name, T value)
@@ -323,10 +348,25 @@ static bool EqualsValue<T>(T left, T right)
         return leftMatrix.GetLength(0) == rightMatrix.GetLength(0) &&
             leftMatrix.GetLength(1) == rightMatrix.GetLength(1) &&
             leftMatrix.Cast<int>().SequenceEqual(rightMatrix.Cast<int>());
+    if (left is int[,,] leftCube && right is int[,,] rightCube)
+        return leftCube.GetLength(0) == rightCube.GetLength(0) &&
+            leftCube.GetLength(1) == rightCube.GetLength(1) &&
+            leftCube.GetLength(2) == rightCube.GetLength(2) &&
+            leftCube.Cast<int>().SequenceEqual(rightCube.Cast<int>());
     if (left is ImmutableArray<int> leftImmutable && right is ImmutableArray<int> rightImmutable)
         return leftImmutable.SequenceEqual(rightImmutable);
     if (left is HashSet<int> leftSet && right is HashSet<int> rightSet)
         return leftSet.SetEquals(rightSet);
+    if (left is LinkedList<int> leftLinked && right is LinkedList<int> rightLinked)
+        return leftLinked.SequenceEqual(rightLinked);
+    if (left is Queue<int> leftQueue && right is Queue<int> rightQueue)
+        return leftQueue.SequenceEqual(rightQueue);
+    if (left is Stack<int> leftStack && right is Stack<int> rightStack)
+        return leftStack.SequenceEqual(rightStack);
+    if (left is ReadOnlyCollection<int> leftReadOnly && right is ReadOnlyCollection<int> rightReadOnly)
+        return leftReadOnly.SequenceEqual(rightReadOnly);
+    if (left is SortedDictionary<int, string> leftSorted && right is SortedDictionary<int, string> rightSorted)
+        return leftSorted.SequenceEqual(rightSorted);
     if (left is Dictionary<int, string> leftDict && right is Dictionary<int, string> rightDict)
         return leftDict.Count == rightDict.Count && leftDict.All(pair =>
             rightDict.TryGetValue(pair.Key, out var value) && value == pair.Value);

@@ -50,7 +50,17 @@ pub const Uri = struct {
     value: Str,
 };
 
-const BuiltinKind = enum { guid, date_time, date_time_offset, time_span, decimal, version, uri };
+pub const DateOnly = struct {
+    pub const memorypack_builtin = .date_only;
+    day_number: i32,
+};
+
+pub const TimeOnly = struct {
+    pub const memorypack_builtin = .time_only;
+    ticks: i64,
+};
+
+const BuiltinKind = enum { guid, date_time, date_time_offset, time_span, decimal, version, uri, date_only, time_only };
 
 pub fn KeyValue(comptime K: type, comptime V: type) type {
     return struct {
@@ -60,16 +70,39 @@ pub fn KeyValue(comptime K: type, comptime V: type) type {
     };
 }
 
+pub fn Tuple3(comptime A: type, comptime B: type, comptime C: type) type {
+    return struct {
+        pub const memorypack_tuple = true;
+        item0: A,
+        item1: B,
+        item2: C,
+    };
+}
+
+pub fn Tuple4(comptime A: type, comptime B: type, comptime C: type, comptime D: type) type {
+    return struct {
+        pub const memorypack_tuple = true;
+        item0: A,
+        item1: B,
+        item2: C,
+        item3: D,
+    };
+}
+
 pub fn Dictionary(comptime K: type, comptime V: type) type {
     return []const KeyValue(K, V);
 }
 
-pub fn Array2(comptime T: type) type {
+pub fn Array(comptime rank: usize, comptime T: type) type {
     return struct {
-        pub const memorypack_multidimensional = 2;
-        dimensions: [2]i32,
+        pub const memorypack_multidimensional_rank = rank;
+        dimensions: [rank]i32,
         values: []const T,
     };
+}
+
+pub fn Array2(comptime T: type) type {
+    return Array(2, T);
 }
 
 fn isStr(comptime T: type) bool {
@@ -106,7 +139,7 @@ fn isExplicit(comptime T: type) bool {
 }
 
 fn isMultiDimensional(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and @hasDecl(T, "memorypack_multidimensional");
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "memorypack_multidimensional_rank");
 }
 
 fn isIgnored(comptime T: type, comptime field_name: []const u8) bool {
@@ -319,6 +352,8 @@ fn writeBuiltin(writer: *Writer, comptime T: type, value: T) Error!void {
             try writePrimitive(writer, i32, value.revision);
         },
         .uri => try writeString(writer, value.value.bytes),
+        .date_only => try writePrimitive(writer, i32, value.day_number),
+        .time_only => try writePrimitive(writer, i64, value.ticks),
     }
 }
 
@@ -363,6 +398,8 @@ fn readBuiltin(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
             const bytes = try readString(reader, gpa) orelse return error.InvalidData;
             return .{ .value = .{ .bytes = bytes } };
         },
+        .date_only => return .{ .day_number = try readPrimitive(reader, i32) },
+        .time_only => return .{ .ticks = try readPrimitive(reader, i64) },
     }
 }
 
@@ -448,12 +485,15 @@ fn readCollection(reader: *Reader, comptime Elem: type, gpa: Allocator) Error!?[
 
 fn writeMultiDimensional(writer: *Writer, comptime T: type, value: T) Error!void {
     const Elem = @typeInfo(@TypeOf(value.values)).pointer.child;
-    if (value.dimensions[0] < 0 or value.dimensions[1] < 0) return error.InvalidData;
-    const expected = @as(usize, @intCast(value.dimensions[0])) * @as(usize, @intCast(value.dimensions[1]));
+    const rank = comptime @field(T, "memorypack_multidimensional_rank");
+    var expected: usize = 1;
+    inline for (0..rank) |i| {
+        if (value.dimensions[i] < 0) return error.InvalidData;
+        expected = std.math.mul(usize, expected, @intCast(value.dimensions[i])) catch return error.InvalidData;
+    }
     if (value.values.len != expected or expected > std.math.maxInt(i32)) return error.InvalidData;
-    try append(writer, &[_]u8{3});
-    try writePrimitive(writer, i32, value.dimensions[0]);
-    try writePrimitive(writer, i32, value.dimensions[1]);
+    try append(writer, &[_]u8{@intCast(rank + 1)});
+    inline for (0..rank) |i| try writePrimitive(writer, i32, value.dimensions[i]);
     try writeI32(writer, @intCast(value.values.len));
     if (Elem == u8) {
         try append(writer, std.mem.sliceAsBytes(value.values));
@@ -464,15 +504,17 @@ fn writeMultiDimensional(writer: *Writer, comptime T: type, value: T) Error!void
 
 fn readMultiDimensional(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
     const Elem = @typeInfo(@TypeOf(@as(T, undefined).values)).pointer.child;
-    if ((try take(reader, 1))[0] != 3) return error.InvalidData;
-    const dimensions = [2]i32{
-        try readPrimitive(reader, i32),
-        try readPrimitive(reader, i32),
-    };
-    if (dimensions[0] < 0 or dimensions[1] < 0) return error.InvalidData;
+    const rank = comptime @field(T, "memorypack_multidimensional_rank");
+    if ((try take(reader, 1))[0] != rank + 1) return error.InvalidData;
+    var dimensions: [rank]i32 = undefined;
+    var expected: usize = 1;
+    inline for (0..rank) |i| {
+        dimensions[i] = try readPrimitive(reader, i32);
+        if (dimensions[i] < 0) return error.InvalidData;
+        expected = std.math.mul(usize, expected, @intCast(dimensions[i])) catch return error.InvalidData;
+    }
     const length = try readI32(reader);
     if (length < 0) return error.InvalidData;
-    const expected = @as(usize, @intCast(dimensions[0])) * @as(usize, @intCast(dimensions[1]));
     if (@as(usize, @intCast(length)) != expected) return error.InvalidData;
     const values = gpa.alloc(Elem, expected) catch return error.OutOfMemory;
     errdefer gpa.free(values);
@@ -1056,6 +1098,9 @@ const ExplicitGap = struct {
     third: ?Str,
 };
 const IntMatrix = Array2(i32);
+const IntCube = Array(3, i32);
+const Tuple3Value = Tuple3(i32, Str, bool);
+const Tuple4Value = Tuple4(i32, Str, bool, f32);
 const IgnoreObject = struct {
     pub const memorypack_ignore_ignored = true;
     kept: i32,
@@ -1137,6 +1182,16 @@ test "C# MemoryPack golden vectors" {
     try checkVector(u128, gpa, @embedFile("vectors/uint128.bin"));
     try checkVector(f16, gpa, @embedFile("vectors/half.bin"));
     try checkVector(IntMatrix, gpa, @embedFile("vectors/array_2d.bin"));
+    try checkVector(IntCube, gpa, @embedFile("vectors/array_3d.bin"));
+    try checkVector(Tuple3Value, gpa, @embedFile("vectors/tuple3.bin"));
+    try checkVector(Tuple4Value, gpa, @embedFile("vectors/tuple4.bin"));
+    try checkVector(DateOnly, gpa, @embedFile("vectors/date_only.bin"));
+    try checkVector(TimeOnly, gpa, @embedFile("vectors/time_only.bin"));
+    try checkVector([]const i32, gpa, @embedFile("vectors/linked_list.bin"));
+    try checkVector([]const i32, gpa, @embedFile("vectors/queue.bin"));
+    try checkVector([]const i32, gpa, @embedFile("vectors/stack.bin"));
+    try checkVector([]const TuplePair, gpa, @embedFile("vectors/sorted_dictionary.bin"));
+    try checkVector([]const i32, gpa, @embedFile("vectors/read_only_collection.bin"));
     try checkVector(IgnoreObject, gpa, @embedFile("vectors/ignore.bin"));
     try checkVector(IncludeObject, gpa, @embedFile("vectors/include.bin"));
 }
@@ -1293,6 +1348,13 @@ test "multi-dimensional and member selection formats" {
     var decoded_matrix = try decode(IntMatrix, gpa, matrix_bytes);
     defer deinit(IntMatrix, gpa, &decoded_matrix);
     try std.testing.expectEqualSlices(i32, &.{ 1, 2, 3, 4 }, decoded_matrix.values);
+
+    const cube = IntCube{ .dimensions = .{ 2, 2, 2 }, .values = &.{ 1, 2, 3, 4, 5, 6, 7, 8 } };
+    const cube_bytes = try encode(gpa, cube);
+    defer gpa.free(cube_bytes);
+    var decoded_cube = try decode(IntCube, gpa, cube_bytes);
+    defer deinit(IntCube, gpa, &decoded_cube);
+    try std.testing.expectEqualSlices(i32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, decoded_cube.values);
 
     const ignored = try encode(gpa, IgnoreObject{ .kept = 7, .ignored = 99 });
     defer gpa.free(ignored);

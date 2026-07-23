@@ -41,8 +41,12 @@ must use the same member order, widths, and MemoryPack category.
   corresponding MemoryPack layouts rather than ordinary Zig struct framing.
 - Native Zig `i128`, `u128`, and `f16` map directly to C# `Int128`, `UInt128`,
   and `Half`.
-- `memorypack.Array2(T)` represents a two-dimensional C# `T[,]` with explicit
-  dimensions and a flat row-major value slice.
+- `memorypack.Array(rank, T)` represents a rank-`rank` C# multidimensional
+  array with explicit dimensions and a flat row-major value slice.
+  `memorypack.Array2(T)` remains as a rank-2 alias.
+- `memorypack.Tuple3(...)` and `memorypack.Tuple4(...)` represent C#
+  `ValueTuple` values with three and four elements. User-defined structs
+  marked `memorypack_tuple` support other arities.
 - `memorypack_ignore_<field>` and `memorypack_include_only`/
   `memorypack_include_<field>` declarations control member selection.
 - Explicit ordering is enabled with `memorypack_explicit = true`,
@@ -77,7 +81,8 @@ host, matching the C# reference implementation.
 - **Collection:** signed little-endian `i32` element count, followed by
   elements. `-1` is null. `byte[]` uses the same count followed by raw bytes.
 - **Tuple:** tuple members are serialized consecutively with no header. This
-  is the format used by `KeyValuePair<K, V>` and by the Zig `KeyValue` type.
+  includes `KeyValuePair<K, V>`, `ValueTuple`, and the Zig `KeyValue`/
+  `Tuple3`/`Tuple4` types.
 - **Union:** a tag from `0` through `249` is one byte followed by the payload.
   Tag `250` is followed by a little-endian `u16` tag and then the payload.
   `255` represents a nullable union. The Zig union tag enum controls these
@@ -86,9 +91,9 @@ host, matching the C# reference implementation.
   Empty and single-entry dictionaries can be byte-identical across languages.
   C# dictionary enumeration order is not guaranteed, so multi-entry
   dictionaries must be compared by field equality rather than raw bytes.
-- **Multi-dimensional array:** a 2D array uses Object header `3`, two i32
+- **Multi-dimensional array:** rank `N` uses Object header `N+1`, `N` i32
   dimensions, an i32 total element count, and row-major values. The Zig
-  `Array2(T)` representation matches this framing.
+  `Array(N, T)` representation matches this framing.
 - **Immutable collections and sets:** C# `ImmutableArray<T>` and `HashSet<T>`
   use the same Collection framing as arrays and lists. Zig emits these as
   deterministic slices; set ordering is not guaranteed across implementations.
@@ -116,7 +121,8 @@ host, matching the C# reference implementation.
 - **Built-in formatters:** `Guid` uses .NET's mixed-endian first three fields;
   `DateTime` is raw `_dateData`; `DateTimeOffset` is offset minutes followed
   by local ticks; `TimeSpan` is i64 ticks; `Decimal` is flags, hi, lo, mid;
-  `Version` is an Object with four i32 members; and `Uri` uses String framing.
+  `Version` is an Object with four i32 members; `DateOnly` is an i32 day
+  number; `TimeOnly` is an i64 tick count; and `Uri` uses String framing.
 - **Explicit layout:** fields are emitted by their numeric order and the
   member count is the configured maximum order plus one. Missing Zig slots
   emit a zero byte. MemoryPack 1.21.3 rejects non-contiguous

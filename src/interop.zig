@@ -34,6 +34,9 @@ const ExplicitObject = struct {
     third: ?memorypack.Str,
 };
 const IntMatrix = memorypack.Array2(i32);
+const IntCube = memorypack.Array(3, i32);
+const Tuple3Value = memorypack.Tuple3(i32, memorypack.Str, bool);
+const Tuple4Value = memorypack.Tuple4(i32, memorypack.Str, bool, f32);
 const IgnoreObject = struct {
     pub const memorypack_ignore_ignored = true;
     kept: i32,
@@ -123,4 +126,25 @@ pub fn main() !void {
     try emit(gpa, []const i32, "hash_set.bin", &.{ 5, 6, 7 });
     try emit(gpa, IgnoreObject, "ignore.bin", .{ .kept = 7, .ignored = 99 });
     try emit(gpa, IncludeObject, "include.bin", .{ .kept = 7, .included = 11 });
+    try emit(gpa, IntCube, "array_3d.bin", .{
+        .dimensions = .{ 2, 2, 2 },
+        .values = &.{ 1, 2, 3, 4, 5, 6, 7, 8 },
+    });
+    try emit(gpa, Tuple3Value, "tuple3.bin", .{ .item0 = 7, .item1 = .{ .bytes = "seven" }, .item2 = true });
+    try emit(gpa, Tuple4Value, "tuple4.bin", .{
+        .item0 = 7,
+        .item1 = .{ .bytes = "seven" },
+        .item2 = true,
+        .item3 = 1.5,
+    });
+    try emit(gpa, memorypack.DateOnly, "date_only.bin", .{ .day_number = 738614 });
+    try emit(gpa, memorypack.TimeOnly, "time_only.bin", .{ .ticks = 220280000000 });
+    try emit(gpa, []const i32, "linked_list.bin", &.{ 5, 6, 7 });
+    try emit(gpa, []const i32, "queue.bin", &.{ 5, 6, 7 });
+    try emit(gpa, []const i32, "stack.bin", &.{ 5, 6, 7 });
+    try emit(gpa, []const TuplePair, "sorted_dictionary.bin", &.{
+        .{ .key = 1, .value = .{ .bytes = "one" } },
+        .{ .key = 2, .value = .{ .bytes = "two" } },
+    });
+    try emit(gpa, []const i32, "read_only_collection.bin", &.{ 5, 6, 7 });
 }
