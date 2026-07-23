@@ -25,6 +25,14 @@ const CircularNode = struct {
     value: i32,
     next: ?*CircularNode,
 };
+const ExplicitObject = struct {
+    pub const memorypack_explicit = true;
+    pub const memorypack_explicit_count = 2;
+    pub const memorypack_order_first = 0;
+    pub const memorypack_order_third = 1;
+    first: i32,
+    third: ?memorypack.Str,
+};
 
 fn emit(gpa: std.mem.Allocator, comptime T: type, name: []const u8, value: T) !void {
     const bytes = try memorypack.encode(gpa, value);
@@ -75,4 +83,23 @@ pub fn main() !void {
     defer gpa.destroy(node);
     node.* = .{ .value = 42, .next = node };
     try emit(gpa, *CircularNode, "circular.bin", node);
+    try emit(gpa, memorypack.Guid, "guid.bin", .{ .bytes = .{
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    } });
+    try emit(gpa, memorypack.DateTime, "datetime.bin", .{ .date_data = 0x48daa19ea6b30000 });
+    try emit(gpa, memorypack.DateTimeOffset, "datetimeoffset.bin", .{
+        .offset_minutes = 330,
+        .ticks = 638162518280000000,
+    });
+    try emit(gpa, memorypack.TimeSpan, "timespan.bin", .{ .ticks = 123456789 });
+    try emit(gpa, memorypack.Decimal, "decimal.bin", .{
+        .flags = 0x40000,
+        .hi = 0,
+        .lo = 0x71fb04cb,
+        .mid = 0x11f,
+    });
+    try emit(gpa, memorypack.Version, "version.bin", .{ .major = 1, .minor = 2, .build = -1, .revision = -1 });
+    try emit(gpa, memorypack.Uri, "uri.bin", .{ .value = .{ .bytes = "https://example.com/a?q=1" } });
+    try emit(gpa, ExplicitObject, "explicit.bin", .{ .first = 7, .third = .{ .bytes = "gap" } });
 }

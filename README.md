@@ -36,6 +36,11 @@ must use the same member order, widths, and MemoryPack category.
   `*T` or `?*T`. It maps to
   `[MemoryPackable(GenerateType.CircularReference)]`; pointer identity is
   preserved during encode, decode, and `deinit`.
+- Built-in formatter newtypes are provided for `Guid`, `DateTime`,
+  `DateTimeOffset`, `TimeSpan`, `Decimal`, `Version`, and `Uri`. They use the
+  corresponding MemoryPack layouts rather than ordinary Zig struct framing.
+- Explicit ordering is enabled with `memorypack_explicit = true`,
+  `memorypack_explicit_count`, and `memorypack_order_<field>` declarations.
 - `memorypack.Str` is the explicit Zig string type and maps to C# `string`.
   Plain `[]u8` and `[]const u8` map to C# `byte[]`.
 - Zig integer, float, bool, and enum widths map directly to the corresponding
@@ -92,6 +97,30 @@ host, matching the C# reference implementation.
   Decoding stores allocated objects before reading their fields, allowing
   genuine cycles. `deinit` tracks pointer identities and frees each object
   once.
+- **Built-in formatters:** `Guid` uses .NET's mixed-endian first three fields;
+  `DateTime` is raw `_dateData`; `DateTimeOffset` is offset minutes followed
+  by local ticks; `TimeSpan` is i64 ticks; `Decimal` is flags, hi, lo, mid;
+  `Version` is an Object with four i32 members; and `Uri` uses String framing.
+- **Explicit layout:** fields are emitted by their numeric order and the
+  member count is the configured maximum order plus one. Missing Zig slots
+  emit a zero byte. MemoryPack 1.21.3 rejects non-contiguous
+  `MemoryPackOrder` values in its source generator, so gap slots cannot be
+  produced by the C# harness; contiguous explicit ordering is byte-tested
+  against C#.
+
+## Serialization callbacks
+
+Object-mapped Zig structs may declare pointer callbacks:
+
+```zig
+pub fn memorypackOnSerializing(self: *Self) void {}
+pub fn memorypackOnSerialized(self: *Self) void {}
+pub fn memorypackOnDeserializing(self: *Self) void {}
+pub fn memorypackOnDeserialized(self: *Self) void {}
+```
+
+They run before and after the corresponding encode/decode operation. Callback
+methods are not serialized and therefore do not change wire bytes.
 
 All eight supported MemoryPack categories are now covered by the Zig tests and
 the real C# interop harness. Unsupported types produce a compile error or

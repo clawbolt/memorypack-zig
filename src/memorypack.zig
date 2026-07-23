@@ -8,6 +8,50 @@ pub const Str = struct {
     bytes: []const u8,
 };
 
+pub const Guid = struct {
+    pub const memorypack_builtin = .guid;
+    bytes: [16]u8,
+};
+
+pub const DateTime = struct {
+    pub const memorypack_builtin = .date_time;
+    date_data: i64,
+};
+
+pub const DateTimeOffset = struct {
+    pub const memorypack_builtin = .date_time_offset;
+    offset_minutes: i64,
+    ticks: i64,
+};
+
+pub const TimeSpan = struct {
+    pub const memorypack_builtin = .time_span;
+    ticks: i64,
+};
+
+pub const Decimal = struct {
+    pub const memorypack_builtin = .decimal;
+    flags: i32,
+    hi: i32,
+    lo: i32,
+    mid: i32,
+};
+
+pub const Version = struct {
+    pub const memorypack_builtin = .version;
+    major: i32,
+    minor: i32,
+    build: i32,
+    revision: i32,
+};
+
+pub const Uri = struct {
+    pub const memorypack_builtin = .uri;
+    value: Str,
+};
+
+const BuiltinKind = enum { guid, date_time, date_time_offset, time_span, decimal, version, uri };
+
 pub fn KeyValue(comptime K: type, comptime V: type) type {
     return struct {
         pub const memorypack_tuple = true;
@@ -22,6 +66,15 @@ pub fn Dictionary(comptime K: type, comptime V: type) type {
 
 fn isStr(comptime T: type) bool {
     return T == Str;
+}
+
+fn builtinKind(comptime T: type) ?BuiltinKind {
+    if (@typeInfo(T) != .@"struct" or !@hasDecl(T, "memorypack_builtin")) return null;
+    return @field(T, "memorypack_builtin");
+}
+
+fn isBuiltin(comptime T: type) bool {
+    return builtinKind(T) != null;
 }
 
 fn isTuple(comptime T: type) bool {
@@ -40,12 +93,24 @@ fn isCircularReference(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "memorypack_circular_reference");
 }
 
+fn isExplicit(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "memorypack_explicit");
+}
+
+fn explicitOrder(comptime T: type, comptime field_name: []const u8) usize {
+    return comptime @field(T, "memorypack_order_" ++ field_name);
+}
+
+fn explicitCount(comptime T: type) usize {
+    return comptime @field(T, "memorypack_explicit_count");
+}
+
 fn isFixed(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .bool, .int, .float, .@"enum" => true,
         .array => |a| isFixed(a.child),
         .@"struct" => |s| blk: {
-            if (s.layout != .@"extern" or isStr(T) or isTuple(T)) break :blk false;
+            if (s.layout != .@"extern" or isStr(T) or isTuple(T) or isBuiltin(T)) break :blk false;
             inline for (std.meta.fields(T)) |f| {
                 if (!isFixed(f.type)) break :blk false;
             }
@@ -56,7 +121,11 @@ fn isFixed(comptime T: type) bool {
 }
 
 fn isObject(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and !isStr(T) and !isTuple(T) and !isFixed(T);
+    return @typeInfo(T) == .@"struct" and !isStr(T) and !isTuple(T) and !isBuiltin(T) and !isFixed(T);
+}
+
+fn callHook(comptime T: type, comptime name: []const u8, value: *T) void {
+    if (comptime @hasDecl(T, name)) @field(T, name)(value);
 }
 
 fn take(reader: *Reader, n: usize) Error![]const u8 {
@@ -179,6 +248,84 @@ fn readPrimitive(reader: *Reader, comptime T: type) Error!T {
     }
 }
 
+fn writeBuiltin(writer: *Writer, comptime T: type, value: T) Error!void {
+    switch (comptime builtinKind(T).?) {
+        .guid => {
+            const bytes = value.bytes;
+            try append(writer, &[_]u8{
+                bytes[3],  bytes[2],  bytes[1],  bytes[0],
+                bytes[5],  bytes[4],  bytes[7],  bytes[6],
+                bytes[8],  bytes[9],  bytes[10], bytes[11],
+                bytes[12], bytes[13], bytes[14], bytes[15],
+            });
+        },
+        .date_time => try writePrimitive(writer, i64, value.date_data),
+        .date_time_offset => {
+            try writePrimitive(writer, i64, value.offset_minutes);
+            try writePrimitive(writer, i64, value.ticks);
+        },
+        .time_span => try writePrimitive(writer, i64, value.ticks),
+        .decimal => {
+            try writePrimitive(writer, i32, value.flags);
+            try writePrimitive(writer, i32, value.hi);
+            try writePrimitive(writer, i32, value.lo);
+            try writePrimitive(writer, i32, value.mid);
+        },
+        .version => {
+            try append(writer, &[_]u8{4});
+            try writePrimitive(writer, i32, value.major);
+            try writePrimitive(writer, i32, value.minor);
+            try writePrimitive(writer, i32, value.build);
+            try writePrimitive(writer, i32, value.revision);
+        },
+        .uri => try writeString(writer, value.value.bytes),
+    }
+}
+
+fn readBuiltin(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
+    switch (comptime builtinKind(T).?) {
+        .guid => {
+            const wire = try take(reader, 16);
+            var bytes: [16]u8 = undefined;
+            bytes[0] = wire[3];
+            bytes[1] = wire[2];
+            bytes[2] = wire[1];
+            bytes[3] = wire[0];
+            bytes[4] = wire[5];
+            bytes[5] = wire[4];
+            bytes[6] = wire[7];
+            bytes[7] = wire[6];
+            @memcpy(bytes[8..], wire[8..]);
+            return .{ .bytes = bytes };
+        },
+        .date_time => return .{ .date_data = try readPrimitive(reader, i64) },
+        .date_time_offset => return .{
+            .offset_minutes = try readPrimitive(reader, i64),
+            .ticks = try readPrimitive(reader, i64),
+        },
+        .time_span => return .{ .ticks = try readPrimitive(reader, i64) },
+        .decimal => return .{
+            .flags = try readPrimitive(reader, i32),
+            .hi = try readPrimitive(reader, i32),
+            .lo = try readPrimitive(reader, i32),
+            .mid = try readPrimitive(reader, i32),
+        },
+        .version => {
+            if ((try take(reader, 1))[0] != 4) return error.InvalidData;
+            return .{
+                .major = try readPrimitive(reader, i32),
+                .minor = try readPrimitive(reader, i32),
+                .build = try readPrimitive(reader, i32),
+                .revision = try readPrimitive(reader, i32),
+            };
+        },
+        .uri => {
+            const bytes = try readString(reader, gpa) orelse return error.InvalidData;
+            return .{ .value = .{ .bytes = bytes } };
+        },
+    }
+}
+
 fn utf16Length(bytes: []const u8) Error!i32 {
     var i: usize = 0;
     var count: usize = 0;
@@ -255,6 +402,38 @@ fn readCollection(reader: *Reader, comptime Elem: type, gpa: Allocator) Error!?[
         @memcpy(result, bytes);
     } else {
         for (result) |*item| item.* = try readValueImpl(reader, Elem, gpa);
+    }
+    return result;
+}
+
+fn writeExplicit(writer: *Writer, comptime T: type, value: T) Error!void {
+    const count = comptime explicitCount(T);
+    try append(writer, &[_]u8{@intCast(count)});
+    inline for (0..comptime count) |order| {
+        var found = false;
+        inline for (std.meta.fields(T)) |f| {
+            if (comptime explicitOrder(T, f.name) == order) {
+                found = true;
+                try writeValueImpl(writer, f.type, @field(value, f.name));
+            }
+        }
+        if (!found) try append(writer, &[_]u8{0});
+    }
+}
+
+fn readExplicit(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
+    const header = (try take(reader, 1))[0];
+    if (header == 255 or header != explicitCount(T)) return error.InvalidData;
+    var result: T = std.mem.zeroes(T);
+    inline for (0..comptime explicitCount(T)) |order| {
+        var found = false;
+        inline for (std.meta.fields(T)) |f| {
+            if (comptime explicitOrder(T, f.name) == order) {
+                found = true;
+                @field(result, f.name) = try readValueImpl(reader, f.type, gpa);
+            }
+        }
+        if (!found) _ = try take(reader, 1);
     }
     return result;
 }
@@ -370,8 +549,10 @@ fn writeUnion(writer: *Writer, comptime T: type, value: T) Error!void {
 
 fn writeValueImpl(writer: *Writer, comptime T: type, value: T) Error!void {
     if (comptime isStr(T)) return writeString(writer, value.bytes);
+    if (comptime isBuiltin(T)) return writeBuiltin(writer, T, value);
     if (comptime isTuple(T)) return writeTuple(writer, T, value);
     if (comptime isVersionTolerant(T)) return writeVersionTolerant(writer, T, value);
+    if (comptime isExplicit(T)) return writeExplicit(writer, T, value);
     switch (@typeInfo(T)) {
         .bool, .int, .float, .@"enum" => try writePrimitive(writer, T, value),
         .optional => |o| {
@@ -408,8 +589,11 @@ fn writeValueImpl(writer: *Writer, comptime T: type, value: T) Error!void {
                 try append(writer, std.mem.asBytes(&value));
             } else {
                 if (std.meta.fields(T).len > 249) @compileError("MemoryPack object member count exceeds 249");
+                var mutable = value;
+                callHook(T, "memorypackOnSerializing", &mutable);
                 try append(writer, &[_]u8{@intCast(std.meta.fields(T).len)});
-                inline for (std.meta.fields(T)) |f| try writeValueImpl(writer, f.type, @field(value, f.name));
+                inline for (std.meta.fields(T)) |f| try writeValueImpl(writer, f.type, @field(mutable, f.name));
+                callHook(T, "memorypackOnSerialized", &mutable);
             }
         },
         .@"union" => try writeUnion(writer, T, value),
@@ -435,6 +619,7 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
         const bytes = try readString(reader, gpa) orelse return error.InvalidData;
         return .{ .bytes = bytes };
     }
+    if (comptime isBuiltin(T)) return readBuiltin(reader, T, gpa);
     if (comptime isTuple(T)) {
         var result: T = undefined;
         inline for (std.meta.fields(T)) |f| {
@@ -443,6 +628,7 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
         return result;
     }
     if (comptime isVersionTolerant(T)) return readVersionTolerant(reader, T, gpa);
+    if (comptime isExplicit(T)) return readExplicit(reader, T, gpa);
     switch (@typeInfo(T)) {
         .bool, .int, .float, .@"enum" => return readPrimitive(reader, T),
         .optional => |o| {
@@ -498,7 +684,9 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
             } else {
                 const header = (try take(reader, 1))[0];
                 if (header == 255 or header != std.meta.fields(T).len) return error.InvalidData;
+                callHook(T, "memorypackOnDeserializing", &result);
                 inline for (std.meta.fields(T)) |f| @field(result, f.name) = try readValueImpl(reader, f.type, gpa);
+                callHook(T, "memorypackOnDeserialized", &result);
             }
             return result;
         },
@@ -667,6 +855,10 @@ fn deinitImpl(comptime T: type, gpa: Allocator, value: *T, seen: *std.AutoHashMa
         gpa.free(value.bytes);
         return;
     }
+    if (comptime isBuiltin(T)) {
+        if (comptime builtinKind(T).? == .uri) gpa.free(value.value.bytes);
+        return;
+    }
     if (comptime isTuple(T)) {
         inline for (std.meta.fields(T)) |f| deinit(f.type, gpa, &@field(value.*, f.name));
         return;
@@ -744,6 +936,44 @@ const CircularNode = struct {
     value: i32,
     next: ?*CircularNode,
 };
+const ExplicitObject = struct {
+    pub const memorypack_explicit = true;
+    pub const memorypack_explicit_count = 2;
+    pub const memorypack_order_first = 0;
+    pub const memorypack_order_third = 1;
+    first: i32,
+    third: ?Str,
+};
+const ExplicitGap = struct {
+    pub const memorypack_explicit = true;
+    pub const memorypack_explicit_count = 3;
+    pub const memorypack_order_first = 0;
+    pub const memorypack_order_third = 2;
+    first: i32,
+    third: ?Str,
+};
+var callback_log: [4]u8 = undefined;
+var callback_index: usize = 0;
+const CallbackObject = struct {
+    value: i32,
+
+    pub fn memorypackOnSerializing(_: *CallbackObject) void {
+        callback_log[callback_index] = 1;
+        callback_index += 1;
+    }
+    pub fn memorypackOnSerialized(_: *CallbackObject) void {
+        callback_log[callback_index] = 2;
+        callback_index += 1;
+    }
+    pub fn memorypackOnDeserializing(_: *CallbackObject) void {
+        callback_log[callback_index] = 3;
+        callback_index += 1;
+    }
+    pub fn memorypackOnDeserialized(_: *CallbackObject) void {
+        callback_log[callback_index] = 4;
+        callback_index += 1;
+    }
+};
 
 fn checkVector(comptime T: type, gpa: Allocator, bytes: []const u8) !void {
     var decoded = try decode(T, gpa, bytes);
@@ -779,6 +1009,14 @@ test "C# MemoryPack golden vectors" {
     try checkVector(MessageUnion, gpa, @embedFile("vectors/union_large.bin"));
     try checkVector(VersionV2, gpa, @embedFile("vectors/versioned.bin"));
     try checkVector(*CircularNode, gpa, @embedFile("vectors/circular.bin"));
+    try checkVector(Guid, gpa, @embedFile("vectors/guid.bin"));
+    try checkVector(DateTime, gpa, @embedFile("vectors/datetime.bin"));
+    try checkVector(DateTimeOffset, gpa, @embedFile("vectors/datetimeoffset.bin"));
+    try checkVector(TimeSpan, gpa, @embedFile("vectors/timespan.bin"));
+    try checkVector(Decimal, gpa, @embedFile("vectors/decimal.bin"));
+    try checkVector(Version, gpa, @embedFile("vectors/version.bin"));
+    try checkVector(Uri, gpa, @embedFile("vectors/uri.bin"));
+    try checkVector(ExplicitObject, gpa, @embedFile("vectors/explicit.bin"));
 }
 
 test "tuple, dictionary, union, and union escape" {
@@ -898,4 +1136,29 @@ test "circular reference object preserves identity" {
     defer deinit(*CircularNode, gpa, &decoded);
     try std.testing.expectEqual(@as(i32, 42), decoded.value);
     try std.testing.expect(decoded.next.? == decoded);
+}
+
+test "explicit layout and callbacks" {
+    const gpa = std.testing.allocator;
+    const value = ExplicitObject{ .first = 7, .third = .{ .bytes = "gap" } };
+    const bytes = try encode(gpa, value);
+    defer gpa.free(bytes);
+    var decoded = try decode(ExplicitObject, gpa, bytes);
+    defer deinit(ExplicitObject, gpa, &decoded);
+    try std.testing.expectEqual(@as(i32, 7), decoded.first);
+    try std.testing.expectEqualStrings("gap", decoded.third.?.bytes);
+
+    const gap = try encode(gpa, ExplicitGap{ .first = 7, .third = .{ .bytes = "gap" } });
+    defer gpa.free(gap);
+    try std.testing.expectEqual(@as(u8, 3), gap[0]);
+    try std.testing.expectEqual(@as(u8, 0), gap[5]);
+
+    callback_index = 0;
+    const callback_bytes = try encode(gpa, CallbackObject{ .value = 9 });
+    defer gpa.free(callback_bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2 }, callback_log[0..2]);
+    callback_index = 0;
+    var callback_value = try decode(CallbackObject, gpa, callback_bytes);
+    defer deinit(CallbackObject, gpa, &callback_value);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 3, 4 }, callback_log[0..2]);
 }

@@ -112,6 +112,15 @@ public partial class CircularObject
     public CircularObject? Next { get; set; }
 }
 
+[MemoryPackable(SerializeLayout.Explicit)]
+public partial class ExplicitObject
+{
+    [MemoryPackOrder(0)]
+    public int First { get; set; }
+    [MemoryPackOrder(1)]
+    public string? Third { get; set; }
+}
+
 public static class Harness
 {
 const string VectorDir = "interop/vectors";
@@ -159,6 +168,14 @@ public static void GenerateVectors()
     var circular = new CircularObject { Value = 42 };
     circular.Next = circular;
     Write("circular.bin", circular);
+    Write("guid.bin", Guid.Parse("00112233-4455-6677-8899-aabbccddeeff"));
+    Write("datetime.bin", new DateTime(638000000000000000, DateTimeKind.Utc));
+    Write("datetimeoffset.bin", new DateTimeOffset(2023, 4, 5, 6, 7, 8, TimeSpan.FromHours(5.5)));
+    Write("timespan.bin", TimeSpan.FromTicks(123456789));
+    Write("decimal.bin", 123456789.0123m);
+    Write("version.bin", new Version(1, 2));
+    Write("uri.bin", new Uri("https://example.com/a?q=1"));
+    Write("explicit.bin", new ExplicitObject { First = 7, Third = "gap" });
 }
 
 public static void VerifyZigVectors()
@@ -200,6 +217,14 @@ public static void VerifyZigVectors()
     var circular = new CircularObject { Value = 42 };
     circular.Next = circular;
     Verify("circular.bin", circular, strictBytes: true);
+    Verify("guid.bin", Guid.Parse("00112233-4455-6677-8899-aabbccddeeff"));
+    Verify("datetime.bin", new DateTime(638000000000000000, DateTimeKind.Utc));
+    Verify("datetimeoffset.bin", new DateTimeOffset(2023, 4, 5, 6, 7, 8, TimeSpan.FromHours(5.5)));
+    Verify("timespan.bin", TimeSpan.FromTicks(123456789));
+    Verify("decimal.bin", 123456789.0123m);
+    Verify("version.bin", new Version(1, 2));
+    Verify("uri.bin", new Uri("https://example.com/a?q=1"));
+    Verify("explicit.bin", new ExplicitObject { First = 7, Third = "gap" });
 }
 
 static void Write<T>(string name, T value)
@@ -264,6 +289,7 @@ static bool EqualsValue<T>(T left, T right)
             lr.Level == rr.Level && EqualsValue(lr.Data, rr.Data) && EqualsValue(lr.Child, rr.Child)) ||
         (left is VersionedObject lv && right is VersionedObject rv && lv.Id == rv.Id && lv.Name == rv.Name) ||
         (left is CircularObject lc && right is CircularObject rc && lc.Value == rc.Value &&
-            rc.Next == rc);
+            rc.Next == rc) ||
+        (left is ExplicitObject le && right is ExplicitObject re && le.First == re.First && le.Third == re.Third);
 }
 }
