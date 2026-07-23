@@ -39,6 +39,12 @@ must use the same member order, widths, and MemoryPack category.
 - Built-in formatter newtypes are provided for `Guid`, `DateTime`,
   `DateTimeOffset`, `TimeSpan`, `Decimal`, `Version`, and `Uri`. They use the
   corresponding MemoryPack layouts rather than ordinary Zig struct framing.
+- Native Zig `i128`, `u128`, and `f16` map directly to C# `Int128`, `UInt128`,
+  and `Half`.
+- `memorypack.Array2(T)` represents a two-dimensional C# `T[,]` with explicit
+  dimensions and a flat row-major value slice.
+- `memorypack_ignore_<field>` and `memorypack_include_only`/
+  `memorypack_include_<field>` declarations control member selection.
 - Explicit ordering is enabled with `memorypack_explicit = true`,
   `memorypack_explicit_count`, and `memorypack_order_<field>` declarations.
 - `memorypack.Str` is the explicit Zig string type and maps to C# `string`.
@@ -80,11 +86,18 @@ host, matching the C# reference implementation.
   Empty and single-entry dictionaries can be byte-identical across languages.
   C# dictionary enumeration order is not guaranteed, so multi-entry
   dictionaries must be compared by field equality rather than raw bytes.
+- **Multi-dimensional array:** a 2D array uses Object header `3`, two i32
+  dimensions, an i32 total element count, and row-major values. The Zig
+  `Array2(T)` representation matches this framing.
+- **Immutable collections and sets:** C# `ImmutableArray<T>` and `HashSet<T>`
+  use the same Collection framing as arrays and lists. Zig emits these as
+  deterministic slices; set ordering is not guaranteed across implementations.
 - **String:** `-1` is null and `0` is empty. The writer uses MemoryPack's
   UTF-8 form: `i32 ~utf8ByteCount`, `i32 utf16Length`, then UTF-8 bytes. The
   reader accepts both this form and the UTF-16 form.
 - **Primitives:** little-endian native-width integers and floats, one-byte
-  booleans, and enums encoded as their tag integer.
+  booleans, enums encoded as their tag integer, and 16-byte little-endian
+  `Int128`/`UInt128` values plus 2-byte `Half` values.
 - **Nullable unmanaged values:** `i32` presence (`0`/`1`) followed by the
   value slot, including a zero slot when absent.
 - **Version-tolerant object:** member count, one typecode-varint byte length
@@ -97,6 +110,9 @@ host, matching the C# reference implementation.
   Decoding stores allocated objects before reading their fields, allowing
   genuine cycles. `deinit` tracks pointer identities and frees each object
   once.
+- **Member selection:** ignored fields are omitted from the member count and
+  default-filled by the reader. Include-only declarations select the fields
+  that remain serialized.
 - **Built-in formatters:** `Guid` uses .NET's mixed-endian first three fields;
   `DateTime` is raw `_dateData`; `DateTimeOffset` is offset minutes followed
   by local ticks; `TimeSpan` is i64 ticks; `Decimal` is flags, hi, lo, mid;
@@ -125,6 +141,13 @@ methods are not serialized and therefore do not change wire bytes.
 All eight supported MemoryPack categories are now covered by the Zig tests and
 the real C# interop harness. Unsupported types produce a compile error or
 invalid-data error rather than malformed output.
+
+`BigInteger` is intentionally not included. Investigation against MemoryPack
+1.21.3 showed its formatter writes `value.TryWriteBytes(temp)` followed by
+`temp.Slice(written)`, producing a collection of the unused zero-filled tail
+(for example, `-12345` produced a 253-byte zero payload and deserialized as
+zero). Supporting arbitrary BigInteger values would therefore reproduce a
+runtime formatter defect rather than a stable value-preserving format.
 
 ## API
 

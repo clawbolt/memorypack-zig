@@ -33,6 +33,19 @@ const ExplicitObject = struct {
     first: i32,
     third: ?memorypack.Str,
 };
+const IntMatrix = memorypack.Array2(i32);
+const IgnoreObject = struct {
+    pub const memorypack_ignore_ignored = true;
+    kept: i32,
+    ignored: i32,
+};
+const IncludeObject = struct {
+    pub const memorypack_include_only = true;
+    pub const memorypack_include_kept = true;
+    pub const memorypack_include_included = true;
+    kept: i32,
+    included: i32,
+};
 
 fn emit(gpa: std.mem.Allocator, comptime T: type, name: []const u8, value: T) !void {
     const bytes = try memorypack.encode(gpa, value);
@@ -102,4 +115,12 @@ pub fn main() !void {
     try emit(gpa, memorypack.Version, "version.bin", .{ .major = 1, .minor = 2, .build = -1, .revision = -1 });
     try emit(gpa, memorypack.Uri, "uri.bin", .{ .value = .{ .bytes = "https://example.com/a?q=1" } });
     try emit(gpa, ExplicitObject, "explicit.bin", .{ .first = 7, .third = .{ .bytes = "gap" } });
+    try emit(gpa, i128, "int128.bin", -123456789012345678901234567890);
+    try emit(gpa, u128, "uint128.bin", 340282366920938463463374607431768211455);
+    try emit(gpa, f16, "half.bin", @as(f16, 1.5));
+    try emit(gpa, IntMatrix, "array_2d.bin", .{ .dimensions = .{ 2, 2 }, .values = &.{ 1, 2, 3, 4 } });
+    try emit(gpa, []const i32, "immutable_array.bin", &.{ 5, 6, 7 });
+    try emit(gpa, []const i32, "hash_set.bin", &.{ 5, 6, 7 });
+    try emit(gpa, IgnoreObject, "ignore.bin", .{ .kept = 7, .ignored = 99 });
+    try emit(gpa, IncludeObject, "include.bin", .{ .kept = 7, .included = 11 });
 }

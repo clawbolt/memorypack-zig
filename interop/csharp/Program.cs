@@ -1,6 +1,7 @@
 using System.Text;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using MemoryPack;
 
 Directory.CreateDirectory("interop/vectors");
@@ -121,6 +122,30 @@ public partial class ExplicitObject
     public string? Third { get; set; }
 }
 
+[MemoryPackable]
+public partial class IgnoreObject
+{
+    public int Kept { get; set; }
+    [MemoryPackIgnore]
+    public int Ignored { get; set; }
+}
+
+[MemoryPackable]
+public partial class IncludeObject
+{
+    public int Kept { get; set; }
+    [MemoryPackInclude]
+    private int included;
+
+    public IncludeObject(int kept, int included)
+    {
+        Kept = kept;
+        this.included = included;
+    }
+
+    public int GetIncluded() => included;
+}
+
 public static class Harness
 {
 const string VectorDir = "interop/vectors";
@@ -176,6 +201,14 @@ public static void GenerateVectors()
     Write("version.bin", new Version(1, 2));
     Write("uri.bin", new Uri("https://example.com/a?q=1"));
     Write("explicit.bin", new ExplicitObject { First = 7, Third = "gap" });
+    Write("int128.bin", Int128.Parse("-123456789012345678901234567890"));
+    Write("uint128.bin", UInt128.Parse("340282366920938463463374607431768211455"));
+    Write("half.bin", (Half)1.5f);
+    Write("array_2d.bin", new[,] { { 1, 2 }, { 3, 4 } });
+    Write("immutable_array.bin", ImmutableArray.Create(5, 6, 7));
+    Write("hash_set.bin", new HashSet<int> { 5, 6, 7 });
+    Write("ignore.bin", new IgnoreObject { Kept = 7, Ignored = 99 });
+    Write("include.bin", new IncludeObject(7, 11));
 }
 
 public static void VerifyZigVectors()
@@ -225,6 +258,14 @@ public static void VerifyZigVectors()
     Verify("version.bin", new Version(1, 2));
     Verify("uri.bin", new Uri("https://example.com/a?q=1"));
     Verify("explicit.bin", new ExplicitObject { First = 7, Third = "gap" });
+    Verify("int128.bin", Int128.Parse("-123456789012345678901234567890"));
+    Verify("uint128.bin", UInt128.Parse("340282366920938463463374607431768211455"));
+    Verify("half.bin", (Half)1.5f);
+    Verify("array_2d.bin", new[,] { { 1, 2 }, { 3, 4 } });
+    Verify("immutable_array.bin", ImmutableArray.Create(5, 6, 7));
+    Verify("hash_set.bin", new HashSet<int> { 5, 6, 7 }, strictBytes: false);
+    Verify("ignore.bin", new IgnoreObject { Kept = 7, Ignored = 0 });
+    Verify("include.bin", new IncludeObject(7, 11));
 }
 
 static void Write<T>(string name, T value)
@@ -278,6 +319,14 @@ static bool EqualsValue<T>(T left, T right)
         return leftBytes.AsSpan().SequenceEqual(rightBytes);
     if (left is int[] leftInts && right is int[] rightInts)
         return leftInts.AsSpan().SequenceEqual(rightInts);
+    if (left is int[,] leftMatrix && right is int[,] rightMatrix)
+        return leftMatrix.GetLength(0) == rightMatrix.GetLength(0) &&
+            leftMatrix.GetLength(1) == rightMatrix.GetLength(1) &&
+            leftMatrix.Cast<int>().SequenceEqual(rightMatrix.Cast<int>());
+    if (left is ImmutableArray<int> leftImmutable && right is ImmutableArray<int> rightImmutable)
+        return leftImmutable.SequenceEqual(rightImmutable);
+    if (left is HashSet<int> leftSet && right is HashSet<int> rightSet)
+        return leftSet.SetEquals(rightSet);
     if (left is Dictionary<int, string> leftDict && right is Dictionary<int, string> rightDict)
         return leftDict.Count == rightDict.Count && leftDict.All(pair =>
             rightDict.TryGetValue(pair.Key, out var value) && value == pair.Value);
@@ -290,6 +339,9 @@ static bool EqualsValue<T>(T left, T right)
         (left is VersionedObject lv && right is VersionedObject rv && lv.Id == rv.Id && lv.Name == rv.Name) ||
         (left is CircularObject lc && right is CircularObject rc && lc.Value == rc.Value &&
             rc.Next == rc) ||
-        (left is ExplicitObject le && right is ExplicitObject re && le.First == re.First && le.Third == re.Third);
+        (left is ExplicitObject le && right is ExplicitObject re && le.First == re.First && le.Third == re.Third) ||
+        (left is IgnoreObject li && right is IgnoreObject ri && li.Kept == ri.Kept && ri.Ignored == 0) ||
+        (left is IncludeObject linc && right is IncludeObject rinc &&
+            linc.Kept == rinc.Kept && linc.GetIncluded() == rinc.GetIncluded());
 }
 }

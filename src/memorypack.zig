@@ -64,6 +64,14 @@ pub fn Dictionary(comptime K: type, comptime V: type) type {
     return []const KeyValue(K, V);
 }
 
+pub fn Array2(comptime T: type) type {
+    return struct {
+        pub const memorypack_multidimensional = 2;
+        dimensions: [2]i32,
+        values: []const T,
+    };
+}
+
 fn isStr(comptime T: type) bool {
     return T == Str;
 }
@@ -97,6 +105,38 @@ fn isExplicit(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "memorypack_explicit");
 }
 
+fn isMultiDimensional(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "memorypack_multidimensional");
+}
+
+fn isIgnored(comptime T: type, comptime field_name: []const u8) bool {
+    return @hasDecl(T, "memorypack_ignore_" ++ field_name);
+}
+
+fn isIncluded(comptime T: type, comptime field_name: []const u8) bool {
+    if (!@hasDecl(T, "memorypack_include_only")) return true;
+    return @hasDecl(T, "memorypack_include_" ++ field_name);
+}
+
+fn isSerializedField(comptime T: type, comptime field_name: []const u8) bool {
+    return !isIgnored(T, field_name) and isIncluded(T, field_name);
+}
+
+fn defaultValue(comptime T: type) T {
+    return switch (@typeInfo(T)) {
+        .@"enum" => |e| @enumFromInt(@intFromEnum(@field(T, e.fields[0].name))),
+        else => std.mem.zeroes(T),
+    };
+}
+
+fn serializedFieldCount(comptime T: type) usize {
+    comptime var count: usize = 0;
+    inline for (std.meta.fields(T)) |f| {
+        if (comptime isSerializedField(T, f.name)) count += 1;
+    }
+    return comptime count;
+}
+
 fn explicitOrder(comptime T: type, comptime field_name: []const u8) usize {
     return comptime @field(T, "memorypack_order_" ++ field_name);
 }
@@ -110,7 +150,7 @@ fn isFixed(comptime T: type) bool {
         .bool, .int, .float, .@"enum" => true,
         .array => |a| isFixed(a.child),
         .@"struct" => |s| blk: {
-            if (s.layout != .@"extern" or isStr(T) or isTuple(T) or isBuiltin(T)) break :blk false;
+            if (s.layout != .@"extern" or isStr(T) or isTuple(T) or isBuiltin(T) or isMultiDimensional(T)) break :blk false;
             inline for (std.meta.fields(T)) |f| {
                 if (!isFixed(f.type)) break :blk false;
             }
@@ -121,7 +161,7 @@ fn isFixed(comptime T: type) bool {
 }
 
 fn isObject(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and !isStr(T) and !isTuple(T) and !isBuiltin(T) and !isFixed(T);
+    return @typeInfo(T) == .@"struct" and !isStr(T) and !isTuple(T) and !isBuiltin(T) and !isMultiDimensional(T) and !isFixed(T);
 }
 
 fn callHook(comptime T: type, comptime name: []const u8, value: *T) void {
@@ -406,6 +446,45 @@ fn readCollection(reader: *Reader, comptime Elem: type, gpa: Allocator) Error!?[
     return result;
 }
 
+fn writeMultiDimensional(writer: *Writer, comptime T: type, value: T) Error!void {
+    const Elem = @typeInfo(@TypeOf(value.values)).pointer.child;
+    if (value.dimensions[0] < 0 or value.dimensions[1] < 0) return error.InvalidData;
+    const expected = @as(usize, @intCast(value.dimensions[0])) * @as(usize, @intCast(value.dimensions[1]));
+    if (value.values.len != expected or expected > std.math.maxInt(i32)) return error.InvalidData;
+    try append(writer, &[_]u8{3});
+    try writePrimitive(writer, i32, value.dimensions[0]);
+    try writePrimitive(writer, i32, value.dimensions[1]);
+    try writeI32(writer, @intCast(value.values.len));
+    if (Elem == u8) {
+        try append(writer, std.mem.sliceAsBytes(value.values));
+    } else {
+        for (value.values) |item| try writeValueImpl(writer, Elem, item);
+    }
+}
+
+fn readMultiDimensional(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
+    const Elem = @typeInfo(@TypeOf(@as(T, undefined).values)).pointer.child;
+    if ((try take(reader, 1))[0] != 3) return error.InvalidData;
+    const dimensions = [2]i32{
+        try readPrimitive(reader, i32),
+        try readPrimitive(reader, i32),
+    };
+    if (dimensions[0] < 0 or dimensions[1] < 0) return error.InvalidData;
+    const length = try readI32(reader);
+    if (length < 0) return error.InvalidData;
+    const expected = @as(usize, @intCast(dimensions[0])) * @as(usize, @intCast(dimensions[1]));
+    if (@as(usize, @intCast(length)) != expected) return error.InvalidData;
+    const values = gpa.alloc(Elem, expected) catch return error.OutOfMemory;
+    errdefer gpa.free(values);
+    if (Elem == u8) {
+        const bytes = try take(reader, expected);
+        @memcpy(values, bytes);
+    } else {
+        for (values) |*item| item.* = try readValueImpl(reader, Elem, gpa);
+    }
+    return .{ .dimensions = dimensions, .values = values };
+}
+
 fn writeExplicit(writer: *Writer, comptime T: type, value: T) Error!void {
     const count = comptime explicitCount(T);
     try append(writer, &[_]u8{@intCast(count)});
@@ -550,6 +629,7 @@ fn writeUnion(writer: *Writer, comptime T: type, value: T) Error!void {
 fn writeValueImpl(writer: *Writer, comptime T: type, value: T) Error!void {
     if (comptime isStr(T)) return writeString(writer, value.bytes);
     if (comptime isBuiltin(T)) return writeBuiltin(writer, T, value);
+    if (comptime isMultiDimensional(T)) return writeMultiDimensional(writer, T, value);
     if (comptime isTuple(T)) return writeTuple(writer, T, value);
     if (comptime isVersionTolerant(T)) return writeVersionTolerant(writer, T, value);
     if (comptime isExplicit(T)) return writeExplicit(writer, T, value);
@@ -588,11 +668,15 @@ fn writeValueImpl(writer: *Writer, comptime T: type, value: T) Error!void {
                 if (comptime builtin.cpu.arch.endian() != .little) @compileError("MemoryPack requires a little-endian host");
                 try append(writer, std.mem.asBytes(&value));
             } else {
-                if (std.meta.fields(T).len > 249) @compileError("MemoryPack object member count exceeds 249");
+                const field_count = comptime serializedFieldCount(T);
+                if (field_count > 249) @compileError("MemoryPack object member count exceeds 249");
                 var mutable = value;
                 callHook(T, "memorypackOnSerializing", &mutable);
-                try append(writer, &[_]u8{@intCast(std.meta.fields(T).len)});
-                inline for (std.meta.fields(T)) |f| try writeValueImpl(writer, f.type, @field(mutable, f.name));
+                try append(writer, &[_]u8{@intCast(field_count)});
+                inline for (std.meta.fields(T)) |f| {
+                    if (comptime isSerializedField(T, f.name))
+                        try writeValueImpl(writer, f.type, @field(mutable, f.name));
+                }
                 callHook(T, "memorypackOnSerialized", &mutable);
             }
         },
@@ -620,6 +704,7 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
         return .{ .bytes = bytes };
     }
     if (comptime isBuiltin(T)) return readBuiltin(reader, T, gpa);
+    if (comptime isMultiDimensional(T)) return readMultiDimensional(reader, T, gpa);
     if (comptime isTuple(T)) {
         var result: T = undefined;
         inline for (std.meta.fields(T)) |f| {
@@ -652,9 +737,16 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
             if (comptime isObject(o.child)) {
                 const header = (try take(reader, 1))[0];
                 if (header == 255) return null;
-                if (header != std.meta.fields(o.child).len) return error.InvalidData;
+                const field_count = comptime serializedFieldCount(o.child);
+                if (header != field_count) return error.InvalidData;
                 var result: o.child = undefined;
-                inline for (std.meta.fields(o.child)) |f| @field(result, f.name) = try readValueImpl(reader, f.type, gpa);
+                inline for (std.meta.fields(o.child)) |f| {
+                    if (comptime isSerializedField(o.child, f.name)) {
+                        @field(result, f.name) = try readValueImpl(reader, f.type, gpa);
+                    } else {
+                        @field(result, f.name) = defaultValue(f.type);
+                    }
+                }
                 return result;
             }
             if (comptime isUnion(o.child)) {
@@ -683,9 +775,16 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
                 @memcpy(std.mem.asBytes(&result), bytes);
             } else {
                 const header = (try take(reader, 1))[0];
-                if (header == 255 or header != std.meta.fields(T).len) return error.InvalidData;
+                const field_count = comptime serializedFieldCount(T);
+                if (header == 255 or header != field_count) return error.InvalidData;
                 callHook(T, "memorypackOnDeserializing", &result);
-                inline for (std.meta.fields(T)) |f| @field(result, f.name) = try readValueImpl(reader, f.type, gpa);
+                inline for (std.meta.fields(T)) |f| {
+                    if (comptime isSerializedField(T, f.name)) {
+                        @field(result, f.name) = try readValueImpl(reader, f.type, gpa);
+                    } else {
+                        @field(result, f.name) = defaultValue(f.type);
+                    }
+                }
                 callHook(T, "memorypackOnDeserialized", &result);
             }
             return result;
@@ -859,6 +958,10 @@ fn deinitImpl(comptime T: type, gpa: Allocator, value: *T, seen: *std.AutoHashMa
         if (comptime builtinKind(T).? == .uri) gpa.free(value.value.bytes);
         return;
     }
+    if (comptime isMultiDimensional(T)) {
+        gpa.free(value.values);
+        return;
+    }
     if (comptime isTuple(T)) {
         inline for (std.meta.fields(T)) |f| deinit(f.type, gpa, &@field(value.*, f.name));
         return;
@@ -952,6 +1055,19 @@ const ExplicitGap = struct {
     first: i32,
     third: ?Str,
 };
+const IntMatrix = Array2(i32);
+const IgnoreObject = struct {
+    pub const memorypack_ignore_ignored = true;
+    kept: i32,
+    ignored: i32,
+};
+const IncludeObject = struct {
+    pub const memorypack_include_only = true;
+    pub const memorypack_include_kept = true;
+    pub const memorypack_include_included = true;
+    kept: i32,
+    included: i32,
+};
 var callback_log: [4]u8 = undefined;
 var callback_index: usize = 0;
 const CallbackObject = struct {
@@ -1017,6 +1133,12 @@ test "C# MemoryPack golden vectors" {
     try checkVector(Version, gpa, @embedFile("vectors/version.bin"));
     try checkVector(Uri, gpa, @embedFile("vectors/uri.bin"));
     try checkVector(ExplicitObject, gpa, @embedFile("vectors/explicit.bin"));
+    try checkVector(i128, gpa, @embedFile("vectors/int128.bin"));
+    try checkVector(u128, gpa, @embedFile("vectors/uint128.bin"));
+    try checkVector(f16, gpa, @embedFile("vectors/half.bin"));
+    try checkVector(IntMatrix, gpa, @embedFile("vectors/array_2d.bin"));
+    try checkVector(IgnoreObject, gpa, @embedFile("vectors/ignore.bin"));
+    try checkVector(IncludeObject, gpa, @embedFile("vectors/include.bin"));
 }
 
 test "tuple, dictionary, union, and union escape" {
@@ -1161,4 +1283,25 @@ test "explicit layout and callbacks" {
     var callback_value = try decode(CallbackObject, gpa, callback_bytes);
     defer deinit(CallbackObject, gpa, &callback_value);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 3, 4 }, callback_log[0..2]);
+}
+
+test "multi-dimensional and member selection formats" {
+    const gpa = std.testing.allocator;
+    const matrix = IntMatrix{ .dimensions = .{ 2, 2 }, .values = &.{ 1, 2, 3, 4 } };
+    const matrix_bytes = try encode(gpa, matrix);
+    defer gpa.free(matrix_bytes);
+    var decoded_matrix = try decode(IntMatrix, gpa, matrix_bytes);
+    defer deinit(IntMatrix, gpa, &decoded_matrix);
+    try std.testing.expectEqualSlices(i32, &.{ 1, 2, 3, 4 }, decoded_matrix.values);
+
+    const ignored = try encode(gpa, IgnoreObject{ .kept = 7, .ignored = 99 });
+    defer gpa.free(ignored);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 7, 0, 0, 0 }, ignored);
+    var decoded_ignored = try decode(IgnoreObject, gpa, ignored);
+    defer deinit(IgnoreObject, gpa, &decoded_ignored);
+    try std.testing.expectEqual(@as(i32, 0), decoded_ignored.ignored);
+
+    const included = try encode(gpa, IncludeObject{ .kept = 7, .included = 11 });
+    defer gpa.free(included);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 2, 7, 0, 0, 0, 11, 0, 0, 0 }, included);
 }
