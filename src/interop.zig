@@ -15,6 +15,16 @@ const MessageUnion = union(UnionTag) {
     text: TextMessage,
     large: LargeMessage,
 };
+const VersionedObject = struct {
+    pub const memorypack_version_tolerant = true;
+    id: i32,
+    name: ?memorypack.Str,
+};
+const CircularNode = struct {
+    pub const memorypack_circular_reference = true;
+    value: i32,
+    next: ?*CircularNode,
+};
 
 fn emit(gpa: std.mem.Allocator, comptime T: type, name: []const u8, value: T) !void {
     const bytes = try memorypack.encode(gpa, value);
@@ -60,4 +70,9 @@ pub fn main() !void {
     });
     try emit(gpa, MessageUnion, "union_small.bin", .{ .text = .{ .value = .{ .bytes = "hello" } } });
     try emit(gpa, MessageUnion, "union_large.bin", .{ .large = .{ .value = 300 } });
+    try emit(gpa, VersionedObject, "versioned.bin", .{ .id = 7, .name = .{ .bytes = "new" } });
+    const node = try gpa.create(CircularNode);
+    defer gpa.destroy(node);
+    node.* = .{ .value = 42, .next = node };
+    try emit(gpa, *CircularNode, "circular.bin", node);
 }

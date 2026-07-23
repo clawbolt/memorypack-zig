@@ -94,6 +94,24 @@ public partial class MessageUnionFormatter
 {
 }
 
+[MemoryPackable(GenerateType.VersionTolerant)]
+public partial class VersionedObject
+{
+    [MemoryPackOrder(0)]
+    public int Id { get; set; }
+    [MemoryPackOrder(1)]
+    public string? Name { get; set; }
+}
+
+[MemoryPackable(GenerateType.CircularReference)]
+public partial class CircularObject
+{
+    [MemoryPackOrder(0)]
+    public int Value { get; set; }
+    [MemoryPackOrder(1)]
+    public CircularObject? Next { get; set; }
+}
+
 public static class Harness
 {
 const string VectorDir = "interop/vectors";
@@ -137,6 +155,10 @@ public static void GenerateVectors()
     Write("dict_multi.bin", new Dictionary<int, string> { [1] = "one", [2] = "two" });
     WriteUnion("union_small.bin", new TextMessage { Value = "hello" });
     WriteUnion("union_large.bin", new LargeMessage { Value = 300 });
+    Write("versioned.bin", new VersionedObject { Id = 7, Name = "new" });
+    var circular = new CircularObject { Value = 42 };
+    circular.Next = circular;
+    Write("circular.bin", circular);
 }
 
 public static void VerifyZigVectors()
@@ -174,6 +196,10 @@ public static void VerifyZigVectors()
     Verify("dict_multi.bin", new Dictionary<int, string> { [1] = "one", [2] = "two" }, strictBytes: false);
     VerifyUnion("union_small.bin", new TextMessage { Value = "hello" });
     VerifyUnion("union_large.bin", new LargeMessage { Value = 300 });
+    Verify("versioned.bin", new VersionedObject { Id = 7, Name = "new" });
+    var circular = new CircularObject { Value = 42 };
+    circular.Next = circular;
+    Verify("circular.bin", circular, strictBytes: true);
 }
 
 static void Write<T>(string name, T value)
@@ -235,6 +261,9 @@ static bool EqualsValue<T>(T left, T right)
         (left is NestedObject ln && right is NestedObject rn && ln.Inner?.Id == rn.Inner?.Id &&
             ln.Inner?.Name == rn.Inner?.Name && EqualsValue(ln.Values, rn.Values)) ||
         (left is RichObject lr && right is RichObject rr && lr.Id == rr.Id && lr.Name == rr.Name &&
-            lr.Level == rr.Level && EqualsValue(lr.Data, rr.Data) && EqualsValue(lr.Child, rr.Child));
+            lr.Level == rr.Level && EqualsValue(lr.Data, rr.Data) && EqualsValue(lr.Child, rr.Child)) ||
+        (left is VersionedObject lv && right is VersionedObject rv && lv.Id == rv.Id && lv.Name == rv.Name) ||
+        (left is CircularObject lc && right is CircularObject rc && lc.Value == rc.Value &&
+            rc.Next == rc);
 }
 }

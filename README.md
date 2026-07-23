@@ -27,6 +27,15 @@ must use the same member order, widths, and MemoryPack category.
   slice-of-key-values representation for C# dictionaries.
 - Zig tagged `union(enum)` maps to a C# MemoryPack union interface and uses
   the enum tag values as MemoryPack union tags.
+- A version-tolerant Zig object opts in by declaring
+  `pub const memorypack_version_tolerant = true;`. It maps to
+  `[MemoryPackable(GenerateType.VersionTolerant)]`; each member is length
+  prefixed so readers can skip unknown fields.
+- A circular-reference Zig object declares
+  `pub const memorypack_circular_reference = true;` and is referenced through
+  `*T` or `?*T`. It maps to
+  `[MemoryPackable(GenerateType.CircularReference)]`; pointer identity is
+  preserved during encode, decode, and `deinit`.
 - `memorypack.Str` is the explicit Zig string type and maps to C# `string`.
   Plain `[]u8` and `[]const u8` map to C# `byte[]`.
 - Zig integer, float, bool, and enum widths map directly to the corresponding
@@ -49,8 +58,11 @@ host, matching the C# reference implementation.
 
 - **Unmanaged struct:** raw struct memory, including padding; no header.
 - **Object:** one unsigned byte member count (`0`–`249`), followed by members
-  in declaration order. `255` is null. Circular-reference marker `250` is
-  deliberately unsupported.
+  in declaration order. `255` is null.
+- **Typecode varint:** values `0`–`127` and `-1`–`-120` are encoded directly
+  as one byte. Larger values use typecodes `-121` through `-128` for `u8`,
+  `i8`, `u16`, `i16`, `u32`, `i32`, `u64`, and `i64`, respectively, followed
+  by the little-endian payload.
 - **Collection:** signed little-endian `i32` element count, followed by
   elements. `-1` is null. `byte[]` uses the same count followed by raw bytes.
 - **Tuple:** tuple members are serialized consecutively with no header. This
@@ -70,10 +82,20 @@ host, matching the C# reference implementation.
   booleans, and enums encoded as their tag integer.
 - **Nullable unmanaged values:** `i32` presence (`0`/`1`) followed by the
   value slot, including a zero slot when absent.
+- **Version-tolerant object:** member count, one typecode-varint byte length
+  for each member, then member values. `255` is null. Readers decode the
+  fields they know, skip extra fields using their lengths, and zero-fill
+  fields absent from older data.
+- **Circular-reference object:** first occurrences use version-tolerant
+  framing followed by a typecode-varint reference ID; repeated pointers use
+  `(250, reference ID)`. IDs are assigned from zero in traversal order.
+  Decoding stores allocated objects before reading their fields, allowing
+  genuine cycles. `deinit` tracks pointer identities and frees each object
+  once.
 
-The following MemoryPack categories remain intentionally deferred:
-version-tolerant objects and circular references. Unsupported types produce a
-compile error or invalid-data error rather than malformed output.
+All eight supported MemoryPack categories are now covered by the Zig tests and
+the real C# interop harness. Unsupported types produce a compile error or
+invalid-data error rather than malformed output.
 
 ## API
 

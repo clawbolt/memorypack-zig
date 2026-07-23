@@ -32,6 +32,14 @@ fn isUnion(comptime T: type) bool {
     return @typeInfo(T) == .@"union";
 }
 
+fn isVersionTolerant(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "memorypack_version_tolerant");
+}
+
+fn isCircularReference(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "memorypack_circular_reference");
+}
+
 fn isFixed(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .bool, .int, .float, .@"enum" => true,
@@ -70,6 +78,69 @@ fn writeI32(writer: *Writer, value: i32) Error!void {
 
 fn readI32(reader: *Reader) Error!i32 {
     return std.mem.readInt(i32, @ptrCast((try take(reader, 4)).ptr), .little);
+}
+
+fn writeTypeCode(writer: *Writer, value: i64) Error!void {
+    if (value >= 0 and value <= 127) return append(writer, &[_]u8{@intCast(value)});
+    if (value < 0 and value >= -120) return append(writer, &[_]u8{@bitCast(@as(i8, @intCast(value)))});
+    if (value >= 0 and value <= std.math.maxInt(u8)) {
+        try append(writer, &[_]u8{@bitCast(@as(i8, -121))});
+        return append(writer, &[_]u8{@intCast(value)});
+    }
+    if (value < 0 and value >= std.math.minInt(i8)) {
+        try append(writer, &[_]u8{@bitCast(@as(i8, -122))});
+        return append(writer, &[_]u8{@bitCast(@as(i8, @intCast(value)))});
+    }
+    if (value >= 0 and value <= std.math.maxInt(u16)) {
+        try append(writer, &[_]u8{@bitCast(@as(i8, -123))});
+        var bytes: [2]u8 = undefined;
+        std.mem.writeInt(u16, &bytes, @intCast(value), .little);
+        return append(writer, &bytes);
+    }
+    if (value < 0 and value >= std.math.minInt(i16)) {
+        try append(writer, &[_]u8{@bitCast(@as(i8, -124))});
+        var bytes: [2]u8 = undefined;
+        std.mem.writeInt(i16, &bytes, @intCast(value), .little);
+        return append(writer, &bytes);
+    }
+    if (value >= 0 and value <= std.math.maxInt(u32)) {
+        try append(writer, &[_]u8{@bitCast(@as(i8, -125))});
+        var bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &bytes, @intCast(value), .little);
+        return append(writer, &bytes);
+    }
+    if (value < 0 and value >= std.math.minInt(i32)) {
+        try append(writer, &[_]u8{@bitCast(@as(i8, -126))});
+        var bytes: [4]u8 = undefined;
+        std.mem.writeInt(i32, &bytes, @intCast(value), .little);
+        return append(writer, &bytes);
+    }
+    if (value >= 0) {
+        try append(writer, &[_]u8{@bitCast(@as(i8, -127))});
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &bytes, @intCast(value), .little);
+        return append(writer, &bytes);
+    }
+    try append(writer, &[_]u8{@bitCast(@as(i8, -128))});
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(i64, &bytes, value, .little);
+    return append(writer, &bytes);
+}
+
+fn readTypeCode(reader: *Reader) Error!i64 {
+    const code: i8 = @bitCast((try take(reader, 1))[0]);
+    if (code >= -120 and code <= 127) return code;
+    return switch (code) {
+        -121 => std.mem.readInt(u8, @ptrCast((try take(reader, 1)).ptr), .little),
+        -122 => std.mem.readInt(i8, @ptrCast((try take(reader, 1)).ptr), .little),
+        -123 => std.mem.readInt(u16, @ptrCast((try take(reader, 2)).ptr), .little),
+        -124 => std.mem.readInt(i16, @ptrCast((try take(reader, 2)).ptr), .little),
+        -125 => @intCast(std.mem.readInt(u32, @ptrCast((try take(reader, 4)).ptr), .little)),
+        -126 => std.mem.readInt(i32, @ptrCast((try take(reader, 4)).ptr), .little),
+        -127 => @intCast(std.mem.readInt(u64, @ptrCast((try take(reader, 8)).ptr), .little)),
+        -128 => std.mem.readInt(i64, @ptrCast((try take(reader, 8)).ptr), .little),
+        else => error.InvalidData,
+    };
 }
 
 fn writePrimitive(writer: *Writer, comptime T: type, value: T) Error!void {
@@ -188,6 +259,90 @@ fn readCollection(reader: *Reader, comptime Elem: type, gpa: Allocator) Error!?[
     return result;
 }
 
+fn writeVersionTolerant(writer: *Writer, comptime T: type, value: T) Error!void {
+    const fields = std.meta.fields(T);
+    if (fields.len > 249) @compileError("MemoryPack version-tolerant member count exceeds 249");
+    var encoded: [249][]u8 = undefined;
+    var lengths: [249]usize = undefined;
+    var count: usize = 0;
+    defer while (count > 0) {
+        count -= 1;
+        writer.gpa.free(encoded[count]);
+    };
+    inline for (fields, 0..) |f, i| {
+        var member_writer = Writer.initWithRefs(writer.gpa, writer.refMap(), writer.nextRefId());
+        errdefer member_writer.deinit();
+        try writeValueImpl(&member_writer, f.type, @field(value, f.name));
+        encoded[i] = try member_writer.toOwnedSlice();
+        lengths[i] = encoded[i].len;
+        count += 1;
+    }
+    try append(writer, &[_]u8{@intCast(fields.len)});
+    for (lengths[0..fields.len]) |length| try writeTypeCode(writer, @intCast(length));
+    for (encoded[0..fields.len]) |bytes| try append(writer, bytes);
+}
+
+fn readVersionTolerant(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
+    const header = (try take(reader, 1))[0];
+    if (header == 255) return error.InvalidData;
+    if (header == 250) return error.InvalidData;
+    const count: usize = header;
+    var lengths: [249]usize = undefined;
+    for (lengths[0..count]) |*length| {
+        const value = try readTypeCode(reader);
+        if (value < 0) return error.InvalidData;
+        length.* = @intCast(value);
+    }
+    var result: T = std.mem.zeroes(T);
+    var index: usize = 0;
+    inline for (std.meta.fields(T)) |f| {
+        if (index < count) {
+            const start = reader.pos;
+            @field(result, f.name) = try readValueImpl(reader, f.type, gpa);
+            if (reader.pos - start > lengths[index]) return error.InvalidData;
+            reader.pos = start + lengths[index];
+        }
+        index += 1;
+    }
+    while (index < count) : (index += 1) {
+        _ = try take(reader, lengths[index]);
+    }
+    return result;
+}
+
+fn writeCircular(writer: *Writer, comptime T: type, value: *T) Error!void {
+    const address = @intFromPtr(value);
+    if (writer.refMap().get(address)) |ref_id| {
+        try append(writer, &[_]u8{250});
+        return writeTypeCode(writer, @intCast(ref_id));
+    }
+    const ref_id = writer.nextRefId().*;
+    writer.nextRefId().* += 1;
+    try writer.refMap().put(address, ref_id);
+
+    const fields = std.meta.fields(T);
+    if (fields.len > 249) @compileError("MemoryPack circular-reference member count exceeds 249");
+    var encoded: [249][]u8 = undefined;
+    var lengths: [249]usize = undefined;
+    var count: usize = 0;
+    defer while (count > 0) {
+        count -= 1;
+        writer.gpa.free(encoded[count]);
+    };
+    inline for (fields, 0..) |f, i| {
+        var member_writer = Writer.initWithRefs(writer.gpa, writer.refMap(), writer.nextRefId());
+        errdefer member_writer.deinit();
+        try writeValueImpl(&member_writer, f.type, @field(value.*, f.name));
+        encoded[i] = try member_writer.toOwnedSlice();
+        lengths[i] = encoded[i].len;
+        count += 1;
+    }
+    try append(writer, &[_]u8{@intCast(fields.len)});
+    for (lengths[0..fields.len]) |length| try writeTypeCode(writer, @intCast(length));
+    try writeTypeCode(writer, @intCast(ref_id));
+    for (encoded[0..fields.len]) |bytes| try append(writer, bytes);
+}
+
 fn writeTuple(writer: *Writer, comptime T: type, value: T) Error!void {
     inline for (std.meta.fields(T)) |f| {
         try writeValueImpl(writer, f.type, @field(value, f.name));
@@ -216,12 +371,20 @@ fn writeUnion(writer: *Writer, comptime T: type, value: T) Error!void {
 fn writeValueImpl(writer: *Writer, comptime T: type, value: T) Error!void {
     if (comptime isStr(T)) return writeString(writer, value.bytes);
     if (comptime isTuple(T)) return writeTuple(writer, T, value);
+    if (comptime isVersionTolerant(T)) return writeVersionTolerant(writer, T, value);
     switch (@typeInfo(T)) {
         .bool, .int, .float, .@"enum" => try writePrimitive(writer, T, value),
         .optional => |o| {
             if (comptime isStr(o.child)) return writeString(writer, if (value) |v| v.bytes else null);
-            if (@typeInfo(o.child) == .pointer and @typeInfo(o.child).pointer.size == .slice) {
+            if (comptime (@typeInfo(o.child) == .pointer and @typeInfo(o.child).pointer.size == .slice)) {
                 return writeCollection(writer, @typeInfo(o.child).pointer.child, if (value) |v| v else null);
+            }
+            if (comptime (@typeInfo(o.child) == .pointer and @typeInfo(o.child).pointer.size == .one and
+                @typeInfo(@typeInfo(o.child).pointer.child) == .@"struct" and
+                isCircularReference(@typeInfo(o.child).pointer.child)))
+            {
+                if (value == null) return append(writer, &[_]u8{255});
+                return writeCircular(writer, @typeInfo(o.child).pointer.child, value.?);
             }
             if (comptime isObject(o.child)) {
                 if (value == null) return append(writer, &[_]u8{255});
@@ -239,6 +402,7 @@ fn writeValueImpl(writer: *Writer, comptime T: type, value: T) Error!void {
             }
         },
         .@"struct" => |s| {
+            if (comptime isVersionTolerant(T)) return writeVersionTolerant(writer, T, value);
             if (s.layout == .@"extern" and isFixed(T)) {
                 if (comptime builtin.cpu.arch.endian() != .little) @compileError("MemoryPack requires a little-endian host");
                 try append(writer, std.mem.asBytes(&value));
@@ -252,6 +416,10 @@ fn writeValueImpl(writer: *Writer, comptime T: type, value: T) Error!void {
         .pointer => |p| switch (p.size) {
             .slice => try writeCollection(writer, p.child, value),
             .one => switch (@typeInfo(p.child)) {
+                .@"struct" => if (comptime isCircularReference(p.child))
+                    try writeCircular(writer, p.child, value)
+                else
+                    @compileError("MemoryPack supports only circular-reference object pointers"),
                 .array => try writeCollection(writer, @typeInfo(p.child).array.child, value.*[0..]),
                 else => @compileError("MemoryPack supports only slices and pointers to arrays"),
             },
@@ -274,6 +442,7 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
         }
         return result;
     }
+    if (comptime isVersionTolerant(T)) return readVersionTolerant(reader, T, gpa);
     switch (@typeInfo(T)) {
         .bool, .int, .float, .@"enum" => return readPrimitive(reader, T),
         .optional => |o| {
@@ -281,9 +450,18 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
                 const bytes = try readString(reader, gpa);
                 return if (bytes) |b| .{ .bytes = b } else null;
             }
-            if (@typeInfo(o.child) == .pointer and @typeInfo(o.child).pointer.size == .slice) {
+            if (comptime (@typeInfo(o.child) == .pointer and @typeInfo(o.child).pointer.size == .slice)) {
                 const values = try readCollection(reader, @typeInfo(o.child).pointer.child, gpa);
                 return values;
+            }
+            if (comptime (@typeInfo(o.child) == .pointer and @typeInfo(o.child).pointer.size == .one and
+                @typeInfo(@typeInfo(o.child).pointer.child) == .@"struct" and
+                isCircularReference(@typeInfo(o.child).pointer.child)))
+            {
+                const header = (try take(reader, 1))[0];
+                if (header == 255) return null;
+                reader.pos -= 1;
+                return try readCircular(reader, @typeInfo(o.child).pointer.child, gpa);
             }
             if (comptime isObject(o.child)) {
                 const header = (try take(reader, 1))[0];
@@ -313,6 +491,7 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
         },
         .@"struct" => |s| {
             var result: T = undefined;
+            if (comptime isVersionTolerant(T)) return readVersionTolerant(reader, T, gpa);
             if (s.layout == .@"extern" and isFixed(T)) {
                 const bytes = try take(reader, @sizeOf(T));
                 @memcpy(std.mem.asBytes(&result), bytes);
@@ -336,6 +515,13 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
             .slice => {
                 const values = try readCollection(reader, p.child, gpa) orelse return error.InvalidData;
                 return values;
+            },
+            .one => switch (@typeInfo(p.child)) {
+                .@"struct" => if (comptime isCircularReference(p.child))
+                    return readCircular(reader, p.child, gpa)
+                else
+                    @compileError("MemoryPack supports only circular-reference object pointers"),
+                else => @compileError("MemoryPack supports only slices and circular-reference pointers"),
             },
             else => @compileError("MemoryPack supports only slices and single-item pointers"),
         },
@@ -362,16 +548,75 @@ fn readUnion(reader: *Reader, comptime T: type, raw_tag: u16, gpa: Allocator) Er
     return error.InvalidData;
 }
 
+fn readCircular(reader: *Reader, comptime T: type, gpa: Allocator) Error!*T {
+    const header = (try take(reader, 1))[0];
+    if (header == 250) {
+        const ref_id = try readTypeCode(reader);
+        if (ref_id < 0) return error.InvalidData;
+        const erased = reader.refs.get(@intCast(ref_id)) orelse return error.InvalidData;
+        return @ptrCast(@alignCast(erased));
+    }
+    if (header == 255 or header > 249) return error.InvalidData;
+    const count: usize = header;
+    var lengths: [249]usize = undefined;
+    for (lengths[0..count]) |*length| {
+        const value = try readTypeCode(reader);
+        if (value < 0) return error.InvalidData;
+        length.* = @intCast(value);
+    }
+    const ref_id = try readTypeCode(reader);
+    if (ref_id < 0) return error.InvalidData;
+    const result = gpa.create(T) catch return error.OutOfMemory;
+    errdefer gpa.destroy(result);
+    try reader.refs.put(@intCast(ref_id), @ptrCast(result));
+    var index: usize = 0;
+    inline for (std.meta.fields(T)) |f| {
+        if (index < count) {
+            const start = reader.pos;
+            @field(result.*, f.name) = try readValueImpl(reader, f.type, gpa);
+            if (reader.pos - start > lengths[index]) return error.InvalidData;
+            reader.pos = start + lengths[index];
+        } else {
+            @field(result.*, f.name) = std.mem.zeroes(f.type);
+        }
+        index += 1;
+    }
+    while (index < count) : (index += 1) _ = try take(reader, lengths[index]);
+    return result;
+}
+
 pub const Writer = struct {
     list: std.ArrayList(u8) = .empty,
     gpa: Allocator,
+    refs: std.AutoHashMap(usize, u64),
+    shared_refs: ?*std.AutoHashMap(usize, u64) = null,
+    next_ref_id: u64 = 0,
+    shared_next_ref_id: ?*u64 = null,
 
     pub fn init(gpa: Allocator) Writer {
-        return .{ .gpa = gpa };
+        return .{ .gpa = gpa, .refs = std.AutoHashMap(usize, u64).init(gpa) };
+    }
+
+    pub fn initWithRefs(gpa: Allocator, refs: *std.AutoHashMap(usize, u64), next_ref_id: *u64) Writer {
+        return .{
+            .gpa = gpa,
+            .refs = std.AutoHashMap(usize, u64).init(gpa),
+            .shared_refs = refs,
+            .shared_next_ref_id = next_ref_id,
+        };
+    }
+
+    pub fn refMap(self: *Writer) *std.AutoHashMap(usize, u64) {
+        return self.shared_refs orelse &self.refs;
+    }
+
+    pub fn nextRefId(self: *Writer) *u64 {
+        return self.shared_next_ref_id orelse &self.next_ref_id;
     }
 
     pub fn deinit(self: *Writer) void {
         self.list.deinit(self.gpa);
+        if (self.shared_refs == null) self.refs.deinit();
     }
 
     pub fn toOwnedSlice(self: *Writer) Error![]u8 {
@@ -387,9 +632,14 @@ pub const Reader = struct {
     buf: []const u8,
     pos: usize = 0,
     gpa: Allocator,
+    refs: std.AutoHashMap(u64, *anyopaque),
 
     pub fn init(gpa: Allocator, buf: []const u8) Reader {
-        return .{ .buf = buf, .gpa = gpa };
+        return .{ .buf = buf, .gpa = gpa, .refs = std.AutoHashMap(u64, *anyopaque).init(gpa) };
+    }
+
+    pub fn deinit(self: *Reader) void {
+        self.refs.deinit();
     }
 
     pub fn readValue(self: *Reader, comptime T: type) Error!T {
@@ -401,15 +651,18 @@ pub fn encode(gpa: Allocator, value: anytype) Error![]u8 {
     var writer = Writer.init(gpa);
     errdefer writer.deinit();
     try writer.writeValue(value);
-    return writer.toOwnedSlice();
+    const result = try writer.toOwnedSlice();
+    writer.deinit();
+    return result;
 }
 
 pub fn decode(comptime T: type, gpa: Allocator, bytes: []const u8) Error!T {
     var reader = Reader.init(gpa, bytes);
+    defer reader.deinit();
     return reader.readValue(T);
 }
 
-pub fn deinit(comptime T: type, gpa: Allocator, value: *T) void {
+fn deinitImpl(comptime T: type, gpa: Allocator, value: *T, seen: *std.AutoHashMap(usize, void)) void {
     if (comptime isStr(T)) {
         gpa.free(value.bytes);
         return;
@@ -419,26 +672,42 @@ pub fn deinit(comptime T: type, gpa: Allocator, value: *T) void {
         return;
     }
     switch (@typeInfo(T)) {
-        .optional => |o| if (value.*) |*v| deinit(o.child, gpa, v),
-        .pointer => |p| if (p.size == .slice) {
-            for (value.*) |*item| deinit(p.child, gpa, @constCast(item));
-            gpa.free(value.*);
+        .optional => |o| if (value.*) |*v| deinitImpl(o.child, gpa, v, seen),
+        .pointer => |p| switch (p.size) {
+            .slice => {
+                for (value.*) |*item| deinitImpl(p.child, gpa, @constCast(item), seen);
+                gpa.free(value.*);
+            },
+            .one => {
+                const address = @intFromPtr(value.*);
+                if (seen.contains(address)) return;
+                seen.put(address, {}) catch return;
+                deinitImpl(p.child, gpa, value.*, seen);
+                gpa.destroy(value.*);
+            },
+            else => {},
         },
         .@"struct" => if (comptime isObject(T)) {
-            inline for (std.meta.fields(T)) |f| deinit(f.type, gpa, &@field(value.*, f.name));
+            inline for (std.meta.fields(T)) |f| deinitImpl(f.type, gpa, &@field(value.*, f.name), seen);
         },
         .@"union" => {
             const active = std.meta.activeTag(value.*);
             const Tag = @typeInfo(T).@"union".tag_type.?;
             inline for (std.meta.fields(T)) |f| {
                 if (@intFromEnum(active) == @intFromEnum(@field(Tag, f.name))) {
-                    deinit(f.type, gpa, &@field(value.*, f.name));
+                    deinitImpl(f.type, gpa, &@field(value.*, f.name), seen);
                 }
             }
         },
-        .array => |a| for (value) |*item| deinit(a.child, gpa, item),
+        .array => |a| for (value) |*item| deinitImpl(a.child, gpa, item, seen),
         else => {},
     }
+}
+
+pub fn deinit(comptime T: type, gpa: Allocator, value: *T) void {
+    var seen = std.AutoHashMap(usize, void).init(gpa);
+    defer seen.deinit();
+    deinitImpl(T, gpa, value, &seen);
 }
 
 const Padded = extern struct { a: u8, b: i32 };
@@ -454,6 +723,26 @@ const MessageUnion = union(UnionTag) {
     number: BasicObject,
     text: TextMessage,
     large: LargeMessage,
+};
+const VersionV1 = struct {
+    pub const memorypack_version_tolerant = true;
+    id: i32,
+};
+const VersionV2 = struct {
+    pub const memorypack_version_tolerant = true;
+    id: i32,
+    name: ?Str,
+};
+const VersionV3 = struct {
+    pub const memorypack_version_tolerant = true;
+    id: i32,
+    name: ?Str,
+    active: bool,
+};
+const CircularNode = struct {
+    pub const memorypack_circular_reference = true;
+    value: i32,
+    next: ?*CircularNode,
 };
 
 fn checkVector(comptime T: type, gpa: Allocator, bytes: []const u8) !void {
@@ -488,6 +777,8 @@ test "C# MemoryPack golden vectors" {
     try checkVector([]const TuplePair, gpa, @embedFile("vectors/dict_multi.bin"));
     try checkVector(MessageUnion, gpa, @embedFile("vectors/union_small.bin"));
     try checkVector(MessageUnion, gpa, @embedFile("vectors/union_large.bin"));
+    try checkVector(VersionV2, gpa, @embedFile("vectors/versioned.bin"));
+    try checkVector(*CircularNode, gpa, @embedFile("vectors/circular.bin"));
 }
 
 test "tuple, dictionary, union, and union escape" {
@@ -536,4 +827,75 @@ test "tuple, dictionary, union, and union escape" {
     const union_null = try encode(gpa, @as(?MessageUnion, null));
     defer gpa.free(union_null);
     try std.testing.expectEqualSlices(u8, &[_]u8{255}, union_null);
+}
+
+test "typecode varint boundaries" {
+    const gpa = std.testing.allocator;
+    const values = [_]i64{
+        0,
+        127,
+        128,
+        255,
+        256,
+        65535,
+        65536,
+        4294967295,
+        4294967296,
+        9223372036854775807,
+        -1,
+        -120,
+        -121,
+        -128,
+        -129,
+        -32768,
+        -32769,
+        -2147483648,
+        -2147483649,
+        -9223372036854775807 - 1,
+    };
+    for (values) |expected| {
+        var writer = Writer.init(gpa);
+        defer writer.deinit();
+        try writeTypeCode(&writer, expected);
+        const bytes = try writer.toOwnedSlice();
+        defer gpa.free(bytes);
+        var reader = Reader.init(gpa, bytes);
+        defer reader.deinit();
+        try std.testing.expectEqual(expected, try readTypeCode(&reader));
+    }
+}
+
+test "version tolerant object evolves across schemas" {
+    const gpa = std.testing.allocator;
+    const v2 = VersionV2{ .id = 7, .name = .{ .bytes = "new" } };
+    const bytes = try encode(gpa, v2);
+    defer gpa.free(bytes);
+    var old = try decode(VersionV1, gpa, bytes);
+    defer deinit(VersionV1, gpa, &old);
+    try std.testing.expectEqual(@as(i32, 7), old.id);
+    var current = try decode(VersionV3, gpa, bytes);
+    defer deinit(VersionV3, gpa, &current);
+    try std.testing.expectEqual(@as(i32, 7), current.id);
+    try std.testing.expectEqualStrings("new", current.name.?.bytes);
+    try std.testing.expect(!current.active);
+
+    const v1 = try encode(gpa, VersionV1{ .id = 9 });
+    defer gpa.free(v1);
+    var newer = try decode(VersionV3, gpa, v1);
+    defer deinit(VersionV3, gpa, &newer);
+    try std.testing.expectEqual(@as(i32, 9), newer.id);
+    try std.testing.expect(newer.name == null);
+}
+
+test "circular reference object preserves identity" {
+    const gpa = std.testing.allocator;
+    const node = try gpa.create(CircularNode);
+    node.* = .{ .value = 42, .next = node };
+    const bytes = try encode(gpa, node);
+    defer gpa.free(bytes);
+    defer gpa.destroy(node);
+    var decoded = try decode(*CircularNode, gpa, bytes);
+    defer deinit(*CircularNode, gpa, &decoded);
+    try std.testing.expectEqual(@as(i32, 42), decoded.value);
+    try std.testing.expect(decoded.next.? == decoded);
 }
