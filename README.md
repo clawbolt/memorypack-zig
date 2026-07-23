@@ -1,155 +1,184 @@
+[English](README.md) | [中文](README.zh-CN.md)
+
 # memorypack-zig
 
-`memorypack-zig` implements a defined, tested subset of
-[Cysharp/MemoryPack](https://github.com/Cysharp/MemoryPack)'s binary wire
-format. The interop harness under `interop/` runs the real C# `MemoryPack`
-NuGet package and verifies both directions byte-for-byte.
+`memorypack-zig` is a Zig implementation of the binary wire format used by
+[Cysharp/MemoryPack](https://github.com/Cysharp/MemoryPack). It targets a
+defined, tested subset and proves binary compatibility with the real C#
+MemoryPack 1.21.3 implementation in both directions.
 
-The format is schema-based and is not self-describing. Zig and C# declarations
-must use the same member order, widths, and MemoryPack category.
+MemoryPack is a schema-based, zero-copy-oriented binary serializer for .NET.
+The format is not self-describing: Zig and C# declarations must agree on
+member order, widths, and MemoryPack category.
 
-## Zig/C# mapping
+## Quick start
 
-- Zig `extern struct`, recursively composed only of fixed unmanaged values,
-  maps to a C# unmanaged sequential `struct`. It uses the struct's native
-  layout, including padding, with no header.
-- Zig regular/auto-layout `struct` maps to a C# `[MemoryPackable] partial
-  class` or record. It uses Object format and starts with a one-byte member
-  count.
-- Zig `?T` maps to C# nullable values or nullable objects. Nullable objects use
-  the Object `255` null header. Nullable unmanaged values use MemoryPack's
-  nullable formatter: an `i32` presence value (`0` or `1`) followed by the
-  value slot; null still carries a zero value slot.
-- Zig `[]T` and `?[]T` map to C# `T[]`/collection values. They use a signed
-  little-endian `i32` length, with `-1` meaning null.
-- `memorypack.KeyValue(K, V)` maps to C# `KeyValuePair<K, V>` and uses Tuple
-  framing with no header. `memorypack.Dictionary(K, V)` is the deterministic
-  slice-of-key-values representation for C# dictionaries.
-- Zig tagged `union(enum)` maps to a C# MemoryPack union interface and uses
-  the enum tag values as MemoryPack union tags.
-- A version-tolerant Zig object opts in by declaring
-  `pub const memorypack_version_tolerant = true;`. It maps to
-  `[MemoryPackable(GenerateType.VersionTolerant)]`; each member is length
-  prefixed so readers can skip unknown fields.
-- A circular-reference Zig object declares
-  `pub const memorypack_circular_reference = true;` and is referenced through
-  `*T` or `?*T`. It maps to
-  `[MemoryPackable(GenerateType.CircularReference)]`; pointer identity is
-  preserved during encode, decode, and `deinit`.
-- Built-in formatter newtypes are provided for `Guid`, `DateTime`,
-  `DateTimeOffset`, `TimeSpan`, `Decimal`, `Version`, and `Uri`. They use the
-  corresponding MemoryPack layouts rather than ordinary Zig struct framing.
-- Native Zig `i128`, `u128`, and `f16` map directly to C# `Int128`, `UInt128`,
-  and `Half`.
-- `memorypack.Array(rank, T)` represents a rank-`rank` C# multidimensional
-  array with explicit dimensions and a flat row-major value slice.
-  `memorypack.Array2(T)` remains as a rank-2 alias.
-- `memorypack.Tuple3(...)` and `memorypack.Tuple4(...)` represent C#
-  `ValueTuple` values with three and four elements. User-defined structs
-  marked `memorypack_tuple` support other arities.
-- `memorypack_ignore_<field>` and `memorypack_include_only`/
-  `memorypack_include_<field>` declarations control member selection.
-- `encodeTo` writes an encoded value to any sink exposing `writeAll`;
-  `decodeFromReader` accepts any reader exposing `read` and buffers the stream
-  before using the existing slice decoder.
-- `decodeInto` overwrites an existing value. Fixed-width slices with matching
-  lengths reuse their existing allocation; other values are safely replaced
-  with ownership-aware cleanup.
-- Explicit ordering is enabled with `memorypack_explicit = true`,
-  `memorypack_explicit_count`, and `memorypack_order_<field>` declarations.
-- `memorypack.Str` is the explicit Zig string type and maps to C# `string`.
-  Plain `[]u8` and `[]const u8` map to C# `byte[]`.
-- Zig integer, float, bool, and enum widths map directly to the corresponding
-  C# primitive/tag type.
+The repository currently builds as a standalone Zig package. To use it from
+another project, add this repository as a dependency in `build.zig`, expose
+the `memorypack` module, and import it:
 
-Because `[]const u8` is otherwise ambiguous, strings must use `Str`:
+```zig
+const memorypack = @import("memorypack");
+```
+
+Minimal encode/decode:
+
+```zig
+const std = @import("std");
+const memorypack = @import("memorypack");
+
+const User = struct {
+    id: i32,
+    name: memorypack.Str,
+};
+
+pub fn main() !void {
+    const gpa = std.heap.page_allocator;
+    const input = User{ .id = 7, .name = .{ .bytes = "Ada" } };
+
+    const bytes = try memorypack.encode(gpa, input);
+    defer gpa.free(bytes);
+
+    var output = try memorypack.decode(User, gpa, bytes);
+    defer memorypack.deinit(User, gpa, &output);
+}
+```
+
+## Usage
+
+### Objects and unmanaged values
+
+Regular Zig structs use Object framing: a one-byte member count followed by
+the fields in declaration order.
 
 ```zig
 const User = struct {
     id: i32,
-    name: ?memorypack.Str,
-    payload: []const u8,
+    name: memorypack.Str,
 };
 ```
 
-## Wire format
+An `extern struct` composed only of fixed unmanaged fields uses the raw-copy
+fast path, including native padding and with no header:
 
-All values are little-endian. The implementation requires a little-endian
-host, matching the C# reference implementation.
+```zig
+const Raw = extern struct {
+    id: u64,
+    score: f64,
+};
+```
 
-- **Unmanaged struct:** raw struct memory, including padding; no header.
-- **Object:** one unsigned byte member count (`0`–`249`), followed by members
-  in declaration order. `255` is null.
-- **Typecode varint:** values `0`–`127` and `-1`–`-120` are encoded directly
-  as one byte. Larger values use typecodes `-121` through `-128` for `u8`,
-  `i8`, `u16`, `i16`, `u32`, `i32`, `u64`, and `i64`, respectively, followed
-  by the little-endian payload.
-- **Collection:** signed little-endian `i32` element count, followed by
-  elements. `-1` is null. `byte[]` uses the same count followed by raw bytes.
-- **Tuple:** tuple members are serialized consecutively with no header. This
-  includes `KeyValuePair<K, V>`, `ValueTuple`, and the Zig `KeyValue`/
-  `Tuple3`/`Tuple4` types.
-- **Union:** a tag from `0` through `249` is one byte followed by the payload.
-  Tag `250` is followed by a little-endian `u16` tag and then the payload.
-  `255` represents a nullable union. The Zig union tag enum controls these
-  numeric tags, including tags requiring the `250` escape.
-- **Dictionary:** a dictionary is a Collection of Tuple key/value pairs.
-  Empty and single-entry dictionaries can be byte-identical across languages.
-  C# dictionary enumeration order is not guaranteed, so multi-entry
-  dictionaries must be compared by field equality rather than raw bytes.
-- **Multi-dimensional array:** rank `N` uses Object header `N+1`, `N` i32
-  dimensions, an i32 total element count, and row-major values. The Zig
-  `Array(N, T)` representation matches this framing.
-- **Immutable collections and sets:** C# `ImmutableArray<T>` and `HashSet<T>`
-  use the same Collection framing as arrays and lists. Zig emits these as
-  deterministic slices; set ordering is not guaranteed across implementations.
-- **String:** `-1` is null and `0` is empty. The writer uses MemoryPack's
-  UTF-8 form: `i32 ~utf8ByteCount`, `i32 utf16Length`, then UTF-8 bytes. The
-  reader accepts both this form and the UTF-16 form.
-- **Primitives:** little-endian native-width integers and floats, one-byte
-  booleans, enums encoded as their tag integer, and 16-byte little-endian
-  `Int128`/`UInt128` values plus 2-byte `Half` values.
-- **Nullable unmanaged values:** `i32` presence (`0`/`1`) followed by the
-  value slot, including a zero slot when absent.
-- **Version-tolerant object:** member count, one typecode-varint byte length
-  for each member, then member values. `255` is null. Readers decode the
-  fields they know, skip extra fields using their lengths, and zero-fill
-  fields absent from older data.
-- **Circular-reference object:** first occurrences use version-tolerant
-  framing followed by a typecode-varint reference ID; repeated pointers use
-  `(250, reference ID)`. IDs are assigned from zero in traversal order.
-  Decoding stores allocated objects before reading their fields, allowing
-  genuine cycles. `deinit` tracks pointer identities and frees each object
-  once.
-- **Member selection:** ignored fields are omitted from the member count and
-  default-filled by the reader. Include-only declarations select the fields
-  that remain serialized.
-- **Built-in formatters:** `Guid` uses .NET's mixed-endian first three fields;
-  `DateTime` is raw `_dateData`; `DateTimeOffset` is offset minutes followed
-  by local ticks; `TimeSpan` is i64 ticks; `Decimal` is flags, hi, lo, mid;
-  `Version` is an Object with four i32 members; `DateOnly` is an i32 day
-  number; `TimeOnly` is an i64 tick count; `BitArray` uses Object header `2`,
-  an i32 bit length, a Collection count of packed u32 words, and little-endian
-  word payloads; `StringBuilder` uses positive-length UTF-16 String framing;
-  `Complex` is real f64 followed by imaginary f64; and `Uri` uses String
-  framing.
-- **Special built-ins:** `CultureInfo` and `TypeName` use String framing.
-  `TypeName` is an opaque type-name string: Zig never resolves or loads the
-  named type. Resolving arbitrary deserialized type names is a security risk and
-  must remain the caller's explicit responsibility. `IPAddress` has a Zig
-  byte-collection representation, but MemoryPack 1.21.3 does not register an
-  `IPAddress` formatter in its default provider, so no C# wire vector is
-  claimed for it.
-- **Explicit layout:** fields are emitted by their numeric order and the
-  member count is the configured maximum order plus one. Missing Zig slots
-  emit a zero byte. MemoryPack 1.21.3 rejects non-contiguous
-  `MemoryPackOrder` values in its source generator, so gap slots cannot be
-  produced by the C# harness; contiguous explicit ordering is byte-tested
-  against C#.
+### Collections, strings, and nullable values
 
-## Serialization callbacks
+Slices use Collection framing (`i32` count, with `-1` for null). Use `Str`
+when the value is a C# `string`; plain byte slices are `byte[]`.
 
-Object-mapped Zig structs may declare pointer callbacks:
+```zig
+const values: []const i32 = &.{ 1, 2, 3 };
+const text = memorypack.Str{ .bytes = "hello" };
+const maybe_text: ?memorypack.Str = null;
+
+const bytes = try memorypack.encode(gpa, values);
+defer gpa.free(bytes);
+```
+
+Nullable objects use the Object null marker. Nullable unmanaged values use
+MemoryPack's presence-plus-value representation.
+
+### Tuples, unions, and dictionaries
+
+`KeyValue` maps to `KeyValuePair`; `Tuple3` and `Tuple4` map to
+`ValueTuple`. Tuple members have no header.
+
+```zig
+const pair = memorypack.KeyValue(i32, memorypack.Str){
+    .key = 1,
+    .value = .{ .bytes = "one" },
+};
+const triple = memorypack.Tuple3(i32, memorypack.Str, bool){
+    .item0 = 7,
+    .item1 = .{ .bytes = "seven" },
+    .item2 = true,
+};
+```
+
+Tagged unions use their enum values as MemoryPack union tags. Tags below 250
+use one byte; larger tags use the `250` plus little-endian `u16` escape.
+
+```zig
+const MessageTag = enum(u16) {
+    number = 0,
+    text = 1,
+};
+
+const Message = union(MessageTag) {
+    number: i32,
+    text: memorypack.Str,
+};
+```
+
+`Dictionary(K, V)` is the deterministic Zig representation: a slice of
+`KeyValue(K, V)`.
+
+```zig
+const entries: memorypack.Dictionary(i32, memorypack.Str) = &.{
+    .{ .key = 1, .value = .{ .bytes = "one" } },
+};
+```
+
+### Version tolerance and circular references
+
+Opt into version-tolerant Object framing with a type declaration:
+
+```zig
+const Versioned = struct {
+    pub const memorypack_version_tolerant = true;
+    id: i32,
+    name: ?memorypack.Str,
+};
+```
+
+Each member is length-prefixed, allowing readers to skip extra members and
+zero-fill members absent from older data.
+
+Circular-reference objects use pointer identity and the same length-aware
+framing:
+
+```zig
+const Node = struct {
+    pub const memorypack_circular_reference = true;
+    value: i32,
+    next: ?*Node,
+};
+
+const node = try gpa.create(Node);
+node.* = .{ .value = 42, .next = node };
+defer gpa.destroy(node);
+
+const bytes = try memorypack.encode(gpa, node);
+defer gpa.free(bytes);
+
+var decoded = try memorypack.decode(*Node, gpa, bytes);
+defer memorypack.deinit(*Node, gpa, &decoded);
+```
+
+### Explicit layout, callbacks, and member selection
+
+Explicit ordering uses declarations named after each field:
+
+```zig
+const Explicit = struct {
+    pub const memorypack_explicit = true;
+    pub const memorypack_explicit_count = 2;
+    pub const memorypack_order_first = 0;
+    pub const memorypack_order_second = 1;
+
+    first: i32,
+    second: memorypack.Str,
+};
+```
+
+Object callbacks are optional pointer methods:
 
 ```zig
 pub fn memorypackOnSerializing(self: *Self) void {}
@@ -158,76 +187,181 @@ pub fn memorypackOnDeserializing(self: *Self) void {}
 pub fn memorypackOnDeserialized(self: *Self) void {}
 ```
 
-They run before and after the corresponding encode/decode operation. Callback
-methods are not serialized and therefore do not change wire bytes.
+Ignore fields with `memorypack_ignore_<field>`. For include-only behavior,
+set `memorypack_include_only` and mark each retained field:
 
-Streaming decode buffers arbitrary reader chunk sizes, including one- and
-two-byte reads, before invoking the same slice decoder. The chunked-reader
-tests cover nested objects and collections.
+```zig
+const Selected = struct {
+    pub const memorypack_ignore_debug = true;
+    pub const memorypack_include_only = true;
+    pub const memorypack_include_id = true;
+    pub const memorypack_include_name = true;
+
+    id: i32,
+    name: memorypack.Str,
+    debug: i32,
+};
+```
+
+Ignored fields do not contribute to member count and are default-filled while
+decoding.
+
+### Streaming and overwrite-deserialize
+
+`encodeTo` accepts any sink with `writeAll(bytes)`. `decodeFromReader` accepts
+any reader with `read(buffer)`; it buffers the stream and then uses the same
+slice decoder:
+
+```zig
+try memorypack.encodeTo(gpa, input, sink);
+var output = try memorypack.decodeFromReader(User, gpa, reader);
+defer memorypack.deinit(User, gpa, &output);
+```
+
+To overwrite an existing value, use:
+
+```zig
+try memorypack.decodeInto(User, gpa, bytes, &existing);
+```
+
+Fixed-width slices with matching lengths reuse their allocation. Other values
+are replaced with ownership-aware cleanup.
+
+### Built-in types
+
+The following public representations have dedicated formatters:
+
+| Zig representation | C# type | Wire mapping |
+| --- | --- | --- |
+| `Guid` | `Guid` | .NET mixed-endian 16-byte layout |
+| `DateTime` | `DateTime` | Raw `_dateData` `i64` |
+| `DateTimeOffset` | `DateTimeOffset` | Offset minutes, then local ticks |
+| `TimeSpan` | `TimeSpan` | Tick `i64` |
+| `Decimal` | `decimal` | `flags`, `hi`, `lo`, `mid` `i32`s |
+| `Version` | `Version` | Object with four `i32` members |
+| `Uri` | `Uri` | String framing |
+| `DateOnly` | `DateOnly` | Day-number `i32` |
+| `TimeOnly` | `TimeOnly` | Tick `i64` |
+| `BitArray` | `BitArray` | Object header, bit length, packed `u32` words |
+| `StringBuilder` | `StringBuilder` | Positive-length UTF-16 String |
+| `Complex` | `Complex` | Real `f64`, imaginary `f64` |
+| `CultureInfo` | `CultureInfo` | Culture name String |
+| `TypeName` | `Type` | Opaque type-name String |
+
+Native `i128`, `u128`, and `f16` map directly to C# `Int128`, `UInt128`, and
+`Half`.
+
+## Supported formats and wire mapping
+
+| Zig form | MemoryPack category |
+| --- | --- |
+| Fixed `extern struct` | Raw unmanaged bytes, including padding |
+| Regular `struct` | Object: one-byte member count plus fields |
+| `[]T`, `?[]T` | Collection: signed `i32` count; `-1` is null |
+| `Str`, `?Str` | String framing |
+| `KeyValue`, `Tuple3`, `Tuple4` | Headerless Tuple |
+| `Dictionary(K, V)` | Collection of Tuple key/value pairs |
+| `union(enum)` | Union tag plus payload |
+| `Array(rank, T)` | Rank plus dimensions, count, row-major values |
+| Version-tolerant struct | Member count, typecode-varint lengths, values |
+| Circular-reference pointer | Length-aware object plus reference IDs |
+| Built-in marker structs | Dedicated MemoryPack formatter |
+
+All values are little-endian and require a little-endian host.
+
+### Wire details and ordering caveats
+
+- Typecode varints encode `0..127` and `-1..-120` directly; typecodes
+  `-121..-128` select `u8`, `i8`, `u16`, `i16`, `u32`, `i32`, `u64`, and `i64`.
+- Tuple values have no header.
+- Union tags `0..249` are one byte; tag `250` is followed by a little-endian
+  `u16`; `255` is the nullable-union marker.
+- Rank `N` multidimensional arrays use Object header `N+1`, `N` dimensions,
+  an `i32` flattened count, then row-major values.
+- Immutable arrays, lists, queues, stacks, linked lists, read-only
+  collections, and sets use Collection framing. Enumeration order still
+  matters for byte equality.
+- Empty and single-entry dictionaries are deterministic in the harness.
+  Multi-entry dictionaries and sets should generally be compared by field or
+  set equality rather than raw bytes.
+- `StringBuilder` uses positive-length UTF-16 framing; normal `Str` writing
+  uses MemoryPack's UTF-8 form and the reader accepts both forms.
+
+## Interop verification
+
+The harness uses the real MemoryPack 1.21.3 NuGet package; it does not use a
+fake serializer. Run:
+
+```sh
+export PATH="$HOME/.dotnet:$HOME/.bin:$HOME/.local/bin:$HOME/.asdf/shims:$PATH"
+./interop/run.sh
+```
+
+The script:
+
+1. Generates C# golden vectors under `interop/vectors/`.
+2. Copies them to `src/vectors/` for embedded Zig tests.
+3. Runs `zig build test`.
+4. Emits matching Zig vectors under the ignored `interop/zig_vectors/`.
+5. Has C# deserialize and reserialize the Zig vectors.
+
+Deterministic cases require byte equality in both directions. Nondeterministic
+collection ordering uses semantic equality where appropriate.
 
 ## Benchmarks
 
-Run the indicative benchmark with:
+Run:
 
-```text
+```sh
 zig build bench -Doptimize=ReleaseFast
 ```
 
-The benchmark uses one retained-capacity arena allocator for each operation
-class, reset between iterations, so MemoryPack and `std.json` use comparable
+The benchmark uses one retained-capacity arena allocator per operation class,
+reset between iterations, so MemoryPack and `std.json` use comparable
 allocation/reclamation strategies. One development-machine run reported:
 
 ```text
-MemoryPack unmanaged: 8269.17 MiB/s (178 ns/op, 1540 bytes/op)
-MemoryPack object: 342.26 MiB/s (7501 ns/op, 2692 bytes/op)
-std.json: 121.94 MiB/s (23956 ns/op, 3063 bytes/op)
+MemoryPack unmanaged: 8520.63 MiB/s (172 ns/op, 1540 bytes/op)
+MemoryPack object: 356.34 MiB/s (7205 ns/op, 2692 bytes/op)
+std.json: 130.81 MiB/s (22332 ns/op, 3063 bytes/op)
 ```
 
-The object result is substantially faster than `std.json` under this fair
-comparison. The earlier object result was a benchmark artifact: it used the
-page allocator and freed every decoded object/string allocation individually,
-while `std.json`'s parsed representation was reclaimed through its aggregate
-parsed allocator. These numbers remain machine-, allocator-, compiler-, and
-dataset-dependent.
+These numbers are machine-, allocator-, compiler-, and dataset-dependent.
 
-All eight supported MemoryPack categories are now covered by the Zig tests and
-the real C# interop harness. Unsupported types produce a compile error or
-invalid-data error rather than malformed output.
+## Known limitations and exclusions
 
-`BigInteger` is intentionally not included. Investigation against MemoryPack
-1.21.3 showed its formatter writes `value.TryWriteBytes(temp)` followed by
-`temp.Slice(written)`, producing a collection of the unused zero-filled tail
-(for example, `-12345` produced a 253-byte zero payload and deserialized as
-zero). Supporting arbitrary BigInteger values would therefore reproduce a
-runtime formatter defect rather than a stable value-preserving format.
+- `BigInteger` is intentionally excluded. MemoryPack 1.21.3's formatter uses
+  `temp.Slice(written)` after `TryWriteBytes`, writing the unused zero-filled
+  tail and losing the value. Zig does not reproduce this defect.
+- `IPAddress` is represented on the Zig side, but the default MemoryPack 1.21.3
+  provider reports `System.Net.IPAddress is not registered in this provider`.
+  Consequently there is no claimed C# vector for it.
+- MemoryPack 1.21.3 rejects non-contiguous `MemoryPackOrder` values in its C#
+  source generator (`MEMPACK026`), although Zig can represent gap slots.
+- Dictionary, set, and other unordered collection enumeration is not
+  byte-stable across implementations.
+- The format is schema-based; unsupported types fail rather than producing
+  silently incompatible bytes.
+- Resolving arbitrary `TypeName` values is intentionally outside this library.
+  Treat them as untrusted strings and do not dynamically load types without an
+  application-level security policy.
 
-## API
+## API summary
 
 ```zig
-const bytes = try memorypack.encode(gpa, value);
-defer gpa.free(bytes);
-
-var value = try memorypack.decode(MyType, gpa, bytes);
-defer memorypack.deinit(MyType, gpa, &value);
+pub fn encode(gpa: Allocator, value: anytype) Error![]u8
+pub fn decode(comptime T: type, gpa: Allocator, bytes: []const u8) Error!T
+pub fn encodeTo(gpa: Allocator, value: anytype, sink: anytype) Error!void
+pub fn decodeFromReader(comptime T: type, gpa: Allocator, reader: anytype) Error!T
+pub fn decodeInto(comptime T: type, gpa: Allocator, bytes: []const u8, target: *T) Error!void
+pub fn deinit(comptime T: type, gpa: Allocator, value: *T) void
 ```
 
-`Writer` and `Reader` expose the streaming primitives used by the one-shot
-helpers.
-
-## Cross-language verification
-
-The harness installs no fake serializer: it references the real
-`MemoryPack` NuGet package.
+## Development
 
 ```sh
-export PATH="$HOME/.bin:$HOME/.local/bin:$HOME/.asdf/shims:$PATH"
-./interop/run.sh
+export PATH="$HOME/.dotnet:$HOME/.bin:$HOME/.local/bin:$HOME/.asdf/shims:$PATH"
 zig build test
-zig build run
 zig fmt --check src build.zig
+./interop/run.sh
 ```
-
-`interop/run.sh` generates C# golden vectors, copies them into
-`src/vectors/` for the Zig test suite, runs `zig build test`, emits matching
-Zig vectors, and asks C# MemoryPack to deserialize and reserialize every Zig
-vector.
