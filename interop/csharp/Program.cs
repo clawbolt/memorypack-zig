@@ -5,6 +5,8 @@ using System.Collections;
 using System.Collections.Immutable;
 using System.Collections.ObjectModel;
 using System.Numerics;
+using System.Net;
+using System.Globalization;
 using MemoryPack;
 
 Directory.CreateDirectory("interop/vectors");
@@ -230,6 +232,8 @@ public static void GenerateVectors()
     Write("bit_array.bin", bits);
     Write("string_builder.bin", new StringBuilder("hello builder"));
     Write("complex.bin", new Complex(1.5, -2.25));
+    Write("culture_info.bin", CultureInfo.GetCultureInfo("en-US"));
+    Write("type_name.bin", typeof(string));
 }
 
 public static void VerifyZigVectors()
@@ -300,6 +304,8 @@ public static void VerifyZigVectors()
     Verify("bit_array.bin", new BitArray(new[] { true, false, true, true, false, false, true, true, true, false }));
     Verify("string_builder.bin", new StringBuilder("hello builder"));
     Verify("complex.bin", new Complex(1.5, -2.25));
+    Verify("culture_info.bin", CultureInfo.GetCultureInfo("en-US"));
+    Verify("type_name.bin", typeof(string));
 }
 
 static void Write<T>(string name, T value)
@@ -380,6 +386,12 @@ static bool EqualsValue<T>(T left, T right)
         return leftBits.Cast<bool>().SequenceEqual(rightBits.Cast<bool>());
     if (left is StringBuilder leftBuilder && right is StringBuilder rightBuilder)
         return leftBuilder.ToString() == rightBuilder.ToString();
+    if (left is IPAddress leftAddress && right is IPAddress rightAddress)
+        return leftAddress.GetAddressBytes().AsSpan().SequenceEqual(rightAddress.GetAddressBytes());
+    if (left is CultureInfo leftCulture && right is CultureInfo rightCulture)
+        return leftCulture.Name == rightCulture.Name;
+    if (left is Type leftType && right is Type rightType)
+        return leftType == rightType;
     if (left is Dictionary<int, string> leftDict && right is Dictionary<int, string> rightDict)
         return leftDict.Count == rightDict.Count && leftDict.All(pair =>
             rightDict.TryGetValue(pair.Key, out var value) && value == pair.Value);

@@ -33,4 +33,16 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.step("test", "Run memorypack tests").dependOn(&b.addRunArtifact(tests).step);
+
+    const bench = b.addExecutable(.{
+        .name = "memorypack-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "memorypack", .module = module }},
+        }),
+    });
+    const run_bench = b.addRunArtifact(bench);
+    b.step("bench", "Run MemoryPack and JSON benchmarks").dependOn(&run_bench.step);
 }

@@ -155,4 +155,8 @@ pub fn main() !void {
         .value = .{ .bytes = "hello builder" },
     });
     try emit(gpa, memorypack.Complex, "complex.bin", .{ .real = 1.5, .imaginary = -2.25 });
+    try emit(gpa, memorypack.CultureInfo, "culture_info.bin", .{ .name = .{ .bytes = "en-US" } });
+    try emit(gpa, memorypack.TypeName, "type_name.bin", .{
+        .name = .{ .bytes = "System.String, System.Private.CoreLib" },
+    });
 }

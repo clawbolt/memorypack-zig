@@ -77,7 +77,22 @@ pub const StringBuilder = struct {
     value: Str,
 };
 
-const BuiltinKind = enum { guid, date_time, date_time_offset, time_span, decimal, version, uri, date_only, time_only, bit_array, complex, string_builder };
+pub const IPAddress = struct {
+    pub const memorypack_builtin = .ip_address;
+    bytes: []const u8,
+};
+
+pub const CultureInfo = struct {
+    pub const memorypack_builtin = .culture_info;
+    name: Str,
+};
+
+pub const TypeName = struct {
+    pub const memorypack_builtin = .type_name;
+    name: Str,
+};
+
+const BuiltinKind = enum { guid, date_time, date_time_offset, time_span, decimal, version, uri, date_only, time_only, bit_array, complex, string_builder, ip_address, culture_info, type_name };
 
 pub fn KeyValue(comptime K: type, comptime V: type) type {
     return struct {
@@ -399,6 +414,13 @@ fn writeBuiltin(writer: *Writer, comptime T: type, value: T) Error!void {
                 try append(writer, &[_]u8{ byte, 0 });
             }
         },
+        .ip_address => {
+            if (value.bytes.len > std.math.maxInt(i32)) return error.InvalidData;
+            try writeI32(writer, @intCast(value.bytes.len));
+            try append(writer, value.bytes);
+        },
+        .culture_info => try writeString(writer, value.name.bytes),
+        .type_name => try writeString(writer, value.name.bytes),
     }
 }
 
@@ -480,6 +502,22 @@ fn readBuiltin(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
                 byte.* = utf16[0];
             }
             return .{ .value = .{ .bytes = bytes } };
+        },
+        .ip_address => {
+            const length = try readI32(reader);
+            if (length < 0) return error.InvalidData;
+            const bytes = gpa.alloc(u8, @intCast(length)) catch return error.OutOfMemory;
+            errdefer gpa.free(bytes);
+            @memcpy(bytes, try take(reader, @intCast(length)));
+            return .{ .bytes = bytes };
+        },
+        .culture_info => {
+            const bytes = try readString(reader, gpa) orelse return error.InvalidData;
+            return .{ .name = .{ .bytes = bytes } };
+        },
+        .type_name => {
+            const bytes = try readString(reader, gpa) orelse return error.InvalidData;
+            return .{ .name = .{ .bytes = bytes } };
         },
     }
 }
@@ -1113,6 +1151,9 @@ fn deinitImpl(comptime T: type, gpa: Allocator, value: *T, seen: *std.AutoHashMa
         if (comptime builtinKind(T).? == .uri) gpa.free(value.value.bytes);
         if (comptime builtinKind(T).? == .bit_array) gpa.free(value.bytes);
         if (comptime builtinKind(T).? == .string_builder) gpa.free(value.value.bytes);
+        if (comptime builtinKind(T).? == .ip_address) gpa.free(value.bytes);
+        if (comptime builtinKind(T).? == .culture_info) gpa.free(value.name.bytes);
+        if (comptime builtinKind(T).? == .type_name) gpa.free(value.name.bytes);
         return;
     }
     if (comptime isMultiDimensional(T)) {
@@ -1312,6 +1353,8 @@ test "C# MemoryPack golden vectors" {
     try checkVector(BitArray, gpa, @embedFile("vectors/bit_array.bin"));
     try checkVector(StringBuilder, gpa, @embedFile("vectors/string_builder.bin"));
     try checkVector(Complex, gpa, @embedFile("vectors/complex.bin"));
+    try checkVector(CultureInfo, gpa, @embedFile("vectors/culture_info.bin"));
+    try checkVector(TypeName, gpa, @embedFile("vectors/type_name.bin"));
 }
 
 test "tuple, dictionary, union, and union escape" {
@@ -1528,7 +1571,7 @@ test "streaming APIs match buffer APIs and reuse slices" {
         bytes: []const u8,
         pos: usize = 0,
         pub fn read(self: *@This(), dest: []u8) !usize {
-            const count = @min(dest.len, self.bytes.len - self.pos);
+            const count = @min(@min(dest.len, 2), self.bytes.len - self.pos);
             @memcpy(dest[0..count], self.bytes[self.pos..][0..count]);
             self.pos += count;
             return count;
@@ -1538,6 +1581,20 @@ test "streaming APIs match buffer APIs and reuse slices" {
     var decoded = try decodeFromReader(BasicObject, gpa, &source);
     defer deinit(BasicObject, gpa, &decoded);
     try std.testing.expectEqual(@as(i32, 42), decoded.id);
+    const rich = RichObject{
+        .id = 99,
+        .name = .{ .bytes = "chunked" },
+        .data = &.{ 8, 9, 10 },
+        .level = .expert,
+        .child = .{ .id = 11, .name = .{ .bytes = "child" } },
+    };
+    const rich_bytes = try encode(gpa, rich);
+    defer gpa.free(rich_bytes);
+    var rich_source = ChunkReader{ .bytes = rich_bytes };
+    var rich_decoded = try decodeFromReader(RichObject, gpa, &rich_source);
+    defer deinit(RichObject, gpa, &rich_decoded);
+    try std.testing.expectEqual(rich.id, rich_decoded.id);
+    try std.testing.expectEqualSlices(u8, rich.name.?.bytes, rich_decoded.name.?.bytes);
 
     const original = try gpa.alloc(i32, 3);
     original[0] = 1;

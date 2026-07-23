@@ -133,6 +133,13 @@ host, matching the C# reference implementation.
   word payloads; `StringBuilder` uses positive-length UTF-16 String framing;
   `Complex` is real f64 followed by imaginary f64; and `Uri` uses String
   framing.
+- **Special built-ins:** `CultureInfo` and `TypeName` use String framing.
+  `TypeName` is an opaque type-name string: Zig never resolves or loads the
+  named type. Resolving arbitrary deserialized type names is a security risk and
+  must remain the caller's explicit responsibility. `IPAddress` has a Zig
+  byte-collection representation, but MemoryPack 1.21.3 does not register an
+  `IPAddress` formatter in its default provider, so no C# wire vector is
+  claimed for it.
 - **Explicit layout:** fields are emitted by their numeric order and the
   member count is the configured maximum order plus one. Missing Zig slots
   emit a zero byte. MemoryPack 1.21.3 rejects non-contiguous
@@ -153,6 +160,28 @@ pub fn memorypackOnDeserialized(self: *Self) void {}
 
 They run before and after the corresponding encode/decode operation. Callback
 methods are not serialized and therefore do not change wire bytes.
+
+Streaming decode buffers arbitrary reader chunk sizes, including one- and
+two-byte reads, before invoking the same slice decoder. The chunked-reader
+tests cover nested objects and collections.
+
+## Benchmarks
+
+Run the indicative benchmark with:
+
+```text
+zig build bench -Doptimize=ReleaseFast
+```
+
+On the development machine, one sample run reported:
+
+```text
+MemoryPack unmanaged: 336.74 MiB/s (4361 ns/op, 1540 bytes/op)
+MemoryPack object: 9.99 MiB/s (257002 ns/op, 2692 bytes/op)
+std.json: 97.38 MiB/s (29997 ns/op, 3063 bytes/op)
+```
+
+These numbers are machine-, allocator-, compiler-, and dataset-dependent.
 
 All eight supported MemoryPack categories are now covered by the Zig tests and
 the real C# interop harness. Unsupported types produce a compile error or
