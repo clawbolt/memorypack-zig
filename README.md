@@ -22,6 +22,11 @@ must use the same member order, widths, and MemoryPack category.
   value slot; null still carries a zero value slot.
 - Zig `[]T` and `?[]T` map to C# `T[]`/collection values. They use a signed
   little-endian `i32` length, with `-1` meaning null.
+- `memorypack.KeyValue(K, V)` maps to C# `KeyValuePair<K, V>` and uses Tuple
+  framing with no header. `memorypack.Dictionary(K, V)` is the deterministic
+  slice-of-key-values representation for C# dictionaries.
+- Zig tagged `union(enum)` maps to a C# MemoryPack union interface and uses
+  the enum tag values as MemoryPack union tags.
 - `memorypack.Str` is the explicit Zig string type and maps to C# `string`.
   Plain `[]u8` and `[]const u8` map to C# `byte[]`.
 - Zig integer, float, bool, and enum widths map directly to the corresponding
@@ -48,6 +53,16 @@ host, matching the C# reference implementation.
   deliberately unsupported.
 - **Collection:** signed little-endian `i32` element count, followed by
   elements. `-1` is null. `byte[]` uses the same count followed by raw bytes.
+- **Tuple:** tuple members are serialized consecutively with no header. This
+  is the format used by `KeyValuePair<K, V>` and by the Zig `KeyValue` type.
+- **Union:** a tag from `0` through `249` is one byte followed by the payload.
+  Tag `250` is followed by a little-endian `u16` tag and then the payload.
+  `255` represents a nullable union. The Zig union tag enum controls these
+  numeric tags, including tags requiring the `250` escape.
+- **Dictionary:** a dictionary is a Collection of Tuple key/value pairs.
+  Empty and single-entry dictionaries can be byte-identical across languages.
+  C# dictionary enumeration order is not guaranteed, so multi-entry
+  dictionaries must be compared by field equality rather than raw bytes.
 - **String:** `-1` is null and `0` is empty. The writer uses MemoryPack's
   UTF-8 form: `i32 ~utf8ByteCount`, `i32 utf16Length`, then UTF-8 bytes. The
   reader accepts both this form and the UTF-16 form.
@@ -56,9 +71,8 @@ host, matching the C# reference implementation.
 - **Nullable unmanaged values:** `i32` presence (`0`/`1`) followed by the
   value slot, including a zero slot when absent.
 
-The following MemoryPack categories are intentionally not implemented:
-unions/polymorphism, version-tolerant objects, circular references,
-tuples/`KeyValuePair`, and dictionaries/maps. Unsupported types produce a
+The following MemoryPack categories remain intentionally deferred:
+version-tolerant objects and circular references. Unsupported types produce a
 compile error or invalid-data error rather than malformed output.
 
 ## API

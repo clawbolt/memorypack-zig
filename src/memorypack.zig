@@ -8,8 +8,28 @@ pub const Str = struct {
     bytes: []const u8,
 };
 
+pub fn KeyValue(comptime K: type, comptime V: type) type {
+    return struct {
+        pub const memorypack_tuple = true;
+        key: K,
+        value: V,
+    };
+}
+
+pub fn Dictionary(comptime K: type, comptime V: type) type {
+    return []const KeyValue(K, V);
+}
+
 fn isStr(comptime T: type) bool {
     return T == Str;
+}
+
+fn isTuple(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "memorypack_tuple");
+}
+
+fn isUnion(comptime T: type) bool {
+    return @typeInfo(T) == .@"union";
 }
 
 fn isFixed(comptime T: type) bool {
@@ -17,7 +37,7 @@ fn isFixed(comptime T: type) bool {
         .bool, .int, .float, .@"enum" => true,
         .array => |a| isFixed(a.child),
         .@"struct" => |s| blk: {
-            if (s.layout != .@"extern" or isStr(T)) break :blk false;
+            if (s.layout != .@"extern" or isStr(T) or isTuple(T)) break :blk false;
             inline for (std.meta.fields(T)) |f| {
                 if (!isFixed(f.type)) break :blk false;
             }
@@ -28,7 +48,7 @@ fn isFixed(comptime T: type) bool {
 }
 
 fn isObject(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and !isStr(T) and !isFixed(T);
+    return @typeInfo(T) == .@"struct" and !isStr(T) and !isTuple(T) and !isFixed(T);
 }
 
 fn take(reader: *Reader, n: usize) Error![]const u8 {
@@ -168,8 +188,34 @@ fn readCollection(reader: *Reader, comptime Elem: type, gpa: Allocator) Error!?[
     return result;
 }
 
+fn writeTuple(writer: *Writer, comptime T: type, value: T) Error!void {
+    inline for (std.meta.fields(T)) |f| {
+        try writeValueImpl(writer, f.type, @field(value, f.name));
+    }
+}
+
+fn writeUnion(writer: *Writer, comptime T: type, value: T) Error!void {
+    const tag = std.meta.activeTag(value);
+    const Tag = @typeInfo(T).@"union".tag_type.?;
+    const tag_value: u16 = @intCast(@intFromEnum(tag));
+    if (tag_value < 250) {
+        try append(writer, &[_]u8{@intCast(tag_value)});
+    } else {
+        try append(writer, &[_]u8{250});
+        var tag_bytes: [2]u8 = undefined;
+        std.mem.writeInt(u16, &tag_bytes, tag_value, .little);
+        try append(writer, &tag_bytes);
+    }
+    inline for (std.meta.fields(T)) |f| {
+        if (@intFromEnum(tag) == @intFromEnum(@field(Tag, f.name))) {
+            try writeValueImpl(writer, f.type, @field(value, f.name));
+        }
+    }
+}
+
 fn writeValueImpl(writer: *Writer, comptime T: type, value: T) Error!void {
     if (comptime isStr(T)) return writeString(writer, value.bytes);
+    if (comptime isTuple(T)) return writeTuple(writer, T, value);
     switch (@typeInfo(T)) {
         .bool, .int, .float, .@"enum" => try writePrimitive(writer, T, value),
         .optional => |o| {
@@ -180,6 +226,10 @@ fn writeValueImpl(writer: *Writer, comptime T: type, value: T) Error!void {
             if (comptime isObject(o.child)) {
                 if (value == null) return append(writer, &[_]u8{255});
                 return writeValueImpl(writer, o.child, value.?);
+            }
+            if (comptime isUnion(o.child)) {
+                if (value == null) return append(writer, &[_]u8{255});
+                return writeUnion(writer, o.child, value.?);
             }
             try writeI32(writer, if (value == null) 0 else 1);
             if (value) |v| {
@@ -198,8 +248,13 @@ fn writeValueImpl(writer: *Writer, comptime T: type, value: T) Error!void {
                 inline for (std.meta.fields(T)) |f| try writeValueImpl(writer, f.type, @field(value, f.name));
             }
         },
+        .@"union" => try writeUnion(writer, T, value),
         .pointer => |p| switch (p.size) {
             .slice => try writeCollection(writer, p.child, value),
+            .one => switch (@typeInfo(p.child)) {
+                .array => try writeCollection(writer, @typeInfo(p.child).array.child, value.*[0..]),
+                else => @compileError("MemoryPack supports only slices and pointers to arrays"),
+            },
             else => @compileError("MemoryPack supports only slices and single-item pointers"),
         },
         .array => |a| try writeCollection(writer, a.child, value[0..]),
@@ -211,6 +266,13 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
     if (comptime isStr(T)) {
         const bytes = try readString(reader, gpa) orelse return error.InvalidData;
         return .{ .bytes = bytes };
+    }
+    if (comptime isTuple(T)) {
+        var result: T = undefined;
+        inline for (std.meta.fields(T)) |f| {
+            @field(result, f.name) = try readValueImpl(reader, f.type, gpa);
+        }
+        return result;
     }
     switch (@typeInfo(T)) {
         .bool, .int, .float, .@"enum" => return readPrimitive(reader, T),
@@ -230,6 +292,15 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
                 var result: o.child = undefined;
                 inline for (std.meta.fields(o.child)) |f| @field(result, f.name) = try readValueImpl(reader, f.type, gpa);
                 return result;
+            }
+            if (comptime isUnion(o.child)) {
+                const tag_byte = (try take(reader, 1))[0];
+                if (tag_byte == 255) return null;
+                const raw_tag: u16 = if (tag_byte == 250)
+                    std.mem.readInt(u16, @ptrCast((try take(reader, 2)).ptr), .little)
+                else
+                    tag_byte;
+                return try readUnion(reader, o.child, raw_tag, gpa);
             }
             const present = try readI32(reader);
             if (present == 0) {
@@ -252,6 +323,15 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
             }
             return result;
         },
+        .@"union" => {
+            const tag_byte = (try take(reader, 1))[0];
+            if (tag_byte == 255) return error.InvalidData;
+            const raw_tag: u16 = if (tag_byte == 250)
+                std.mem.readInt(u16, @ptrCast((try take(reader, 2)).ptr), .little)
+            else
+                tag_byte;
+            return readUnion(reader, T, raw_tag, gpa);
+        },
         .pointer => |p| switch (p.size) {
             .slice => {
                 const values = try readCollection(reader, p.child, gpa) orelse return error.InvalidData;
@@ -269,6 +349,17 @@ fn readValueImpl(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
         },
         else => @compileError("unsupported MemoryPack type: " ++ @typeName(T)),
     }
+}
+
+fn readUnion(reader: *Reader, comptime T: type, raw_tag: u16, gpa: Allocator) Error!T {
+    const union_info = @typeInfo(T).@"union";
+    const Tag = union_info.tag_type orelse return error.InvalidData;
+    inline for (std.meta.fields(T)) |f| {
+        if (raw_tag == @intFromEnum(@field(Tag, f.name))) {
+            return @unionInit(T, f.name, try readValueImpl(reader, f.type, gpa));
+        }
+    }
+    return error.InvalidData;
 }
 
 pub const Writer = struct {
@@ -323,6 +414,10 @@ pub fn deinit(comptime T: type, gpa: Allocator, value: *T) void {
         gpa.free(value.bytes);
         return;
     }
+    if (comptime isTuple(T)) {
+        inline for (std.meta.fields(T)) |f| deinit(f.type, gpa, &@field(value.*, f.name));
+        return;
+    }
     switch (@typeInfo(T)) {
         .optional => |o| if (value.*) |*v| deinit(o.child, gpa, v),
         .pointer => |p| if (p.size == .slice) {
@@ -331,6 +426,15 @@ pub fn deinit(comptime T: type, gpa: Allocator, value: *T) void {
         },
         .@"struct" => if (comptime isObject(T)) {
             inline for (std.meta.fields(T)) |f| deinit(f.type, gpa, &@field(value.*, f.name));
+        },
+        .@"union" => {
+            const active = std.meta.activeTag(value.*);
+            const Tag = @typeInfo(T).@"union".tag_type.?;
+            inline for (std.meta.fields(T)) |f| {
+                if (@intFromEnum(active) == @intFromEnum(@field(Tag, f.name))) {
+                    deinit(f.type, gpa, &@field(value.*, f.name));
+                }
+            }
         },
         .array => |a| for (value) |*item| deinit(a.child, gpa, item),
         else => {},
@@ -342,6 +446,15 @@ const BasicObject = struct { id: i32, name: ?Str };
 const NestedObject = struct { inner: ?BasicObject, values: ?[]const i32 };
 const Level = enum(u8) { novice = 2, expert = 7 };
 const RichObject = struct { id: u64, name: ?Str, data: ?[]const u8, level: Level, child: ?BasicObject };
+const TuplePair = KeyValue(i32, Str);
+const TextMessage = struct { value: ?Str };
+const LargeMessage = struct { value: i32 };
+const UnionTag = enum(u16) { number = 0, text = 1, large = 300 };
+const MessageUnion = union(UnionTag) {
+    number: BasicObject,
+    text: TextMessage,
+    large: LargeMessage,
+};
 
 fn checkVector(comptime T: type, gpa: Allocator, bytes: []const u8) !void {
     var decoded = try decode(T, gpa, bytes);
@@ -369,4 +482,58 @@ test "C# MemoryPack golden vectors" {
     try checkVector(?i32, gpa, @embedFile("vectors/nullable_value_null.bin"));
     try checkVector(?BasicObject, gpa, @embedFile("vectors/nullable_object.bin"));
     try checkVector(RichObject, gpa, @embedFile("vectors/rich.bin"));
+    try checkVector(TuplePair, gpa, @embedFile("vectors/tuple.bin"));
+    try checkVector([]const TuplePair, gpa, @embedFile("vectors/dict_empty.bin"));
+    try checkVector([]const TuplePair, gpa, @embedFile("vectors/dict_single.bin"));
+    try checkVector([]const TuplePair, gpa, @embedFile("vectors/dict_multi.bin"));
+    try checkVector(MessageUnion, gpa, @embedFile("vectors/union_small.bin"));
+    try checkVector(MessageUnion, gpa, @embedFile("vectors/union_large.bin"));
+}
+
+test "tuple, dictionary, union, and union escape" {
+    const gpa = std.testing.allocator;
+    const pair = TuplePair{ .key = 7, .value = .{ .bytes = "seven" } };
+    const pair_bytes = try encode(gpa, pair);
+    defer gpa.free(pair_bytes);
+    var pair_back = try decode(TuplePair, gpa, pair_bytes);
+    defer deinit(TuplePair, gpa, &pair_back);
+    try std.testing.expectEqual(@as(i32, 7), pair_back.key);
+    try std.testing.expectEqualStrings("seven", pair_back.value.bytes);
+
+    const entries = [_]TuplePair{
+        .{ .key = 1, .value = .{ .bytes = "one" } },
+        .{ .key = 2, .value = .{ .bytes = "two" } },
+    };
+    const dict_bytes = try encode(gpa, entries[0..]);
+    defer gpa.free(dict_bytes);
+    var dict_back = try decode([]const TuplePair, gpa, dict_bytes);
+    defer deinit([]const TuplePair, gpa, &dict_back);
+    try std.testing.expectEqual(@as(usize, 2), dict_back.len);
+
+    const empty_bytes = try encode(gpa, @as([]const TuplePair, &.{}));
+    defer gpa.free(empty_bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0 }, empty_bytes);
+    const null_bytes = try encode(gpa, @as(?[]const TuplePair, null));
+    defer gpa.free(null_bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xff, 0xff, 0xff, 0xff }, null_bytes);
+
+    const small = MessageUnion{ .text = .{ .value = .{ .bytes = "hi" } } };
+    const small_bytes = try encode(gpa, small);
+    defer gpa.free(small_bytes);
+    try std.testing.expectEqual(@as(u8, 1), small_bytes[0]);
+    var small_back = try decode(MessageUnion, gpa, small_bytes);
+    defer deinit(MessageUnion, gpa, &small_back);
+    try std.testing.expectEqualStrings("hi", small_back.text.value.?.bytes);
+
+    const large = MessageUnion{ .large = .{ .value = 4 } };
+    const large_bytes = try encode(gpa, large);
+    defer gpa.free(large_bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 250, 44, 1 }, large_bytes[0..3]);
+    var large_back = try decode(MessageUnion, gpa, large_bytes);
+    defer deinit(MessageUnion, gpa, &large_back);
+    try std.testing.expectEqual(@as(i32, 4), large_back.large.value);
+
+    const union_null = try encode(gpa, @as(?MessageUnion, null));
+    defer gpa.free(union_null);
+    try std.testing.expectEqualSlices(u8, &[_]u8{255}, union_null);
 }

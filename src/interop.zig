@@ -6,6 +6,15 @@ const BasicObject = struct { id: i32, name: ?memorypack.Str };
 const NestedObject = struct { inner: ?BasicObject, values: ?[]const i32 };
 const Level = enum(u8) { novice = 2, expert = 7 };
 const RichObject = struct { id: u64, name: ?memorypack.Str, data: ?[]const u8, level: Level, child: ?BasicObject };
+const TuplePair = memorypack.KeyValue(i32, memorypack.Str);
+const TextMessage = struct { value: ?memorypack.Str };
+const LargeMessage = struct { value: i32 };
+const UnionTag = enum(u16) { number = 0, text = 1, large = 300 };
+const MessageUnion = union(UnionTag) {
+    number: BasicObject,
+    text: TextMessage,
+    large: LargeMessage,
+};
 
 fn emit(gpa: std.mem.Allocator, comptime T: type, name: []const u8, value: T) !void {
     const bytes = try memorypack.encode(gpa, value);
@@ -42,4 +51,13 @@ pub fn main() !void {
         .level = .expert,
         .child = .{ .id = 11, .name = .{ .bytes = "child" } },
     });
+    try emit(gpa, TuplePair, "tuple.bin", .{ .key = 7, .value = .{ .bytes = "seven" } });
+    try emit(gpa, []const TuplePair, "dict_empty.bin", &.{});
+    try emit(gpa, []const TuplePair, "dict_single.bin", &.{.{ .key = 1, .value = .{ .bytes = "one" } }});
+    try emit(gpa, []const TuplePair, "dict_multi.bin", &.{
+        .{ .key = 1, .value = .{ .bytes = "one" } },
+        .{ .key = 2, .value = .{ .bytes = "two" } },
+    });
+    try emit(gpa, MessageUnion, "union_small.bin", .{ .text = .{ .value = .{ .bytes = "hello" } } });
+    try emit(gpa, MessageUnion, "union_large.bin", .{ .large = .{ .value = 300 } });
 }

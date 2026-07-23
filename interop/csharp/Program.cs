@@ -1,5 +1,6 @@
 using System.Text;
 using System.Runtime.InteropServices;
+using System.Collections.Generic;
 using MemoryPack;
 
 Directory.CreateDirectory("interop/vectors");
@@ -62,6 +63,37 @@ public struct Padded
     public int B;
 }
 
+[MemoryPackable]
+public partial class NumberMessage : IMessage
+{
+    public int Value { get; set; }
+}
+
+[MemoryPackable]
+public partial class TextMessage : IMessage
+{
+    public string? Value { get; set; }
+}
+
+[MemoryPackable]
+public partial class LargeMessage : IMessage
+{
+    public int Value { get; set; }
+}
+
+[MemoryPackable(GenerateType.NoGenerate)]
+public partial interface IMessage
+{
+}
+
+[MemoryPackUnionFormatter(typeof(IMessage))]
+[MemoryPackUnion(0, typeof(NumberMessage))]
+[MemoryPackUnion(1, typeof(TextMessage))]
+[MemoryPackUnion(300, typeof(LargeMessage))]
+public partial class MessageUnionFormatter
+{
+}
+
 public static class Harness
 {
 const string VectorDir = "interop/vectors";
@@ -99,6 +131,12 @@ public static void GenerateVectors()
         Level = Level.Expert,
         Child = new BasicObject { Id = 11, Name = "child" },
     });
+    Write("tuple.bin", new KeyValuePair<int, string>(7, "seven"));
+    Write("dict_empty.bin", new Dictionary<int, string>());
+    Write("dict_single.bin", new Dictionary<int, string> { [1] = "one" });
+    Write("dict_multi.bin", new Dictionary<int, string> { [1] = "one", [2] = "two" });
+    WriteUnion("union_small.bin", new TextMessage { Value = "hello" });
+    WriteUnion("union_large.bin", new LargeMessage { Value = 300 });
 }
 
 public static void VerifyZigVectors()
@@ -130,6 +168,12 @@ public static void VerifyZigVectors()
         Level = Level.Expert,
         Child = new BasicObject { Id = 11, Name = "child" },
     });
+    Verify("tuple.bin", new KeyValuePair<int, string>(7, "seven"));
+    Verify("dict_empty.bin", new Dictionary<int, string>(), strictBytes: true);
+    Verify("dict_single.bin", new Dictionary<int, string> { [1] = "one" }, strictBytes: true);
+    Verify("dict_multi.bin", new Dictionary<int, string> { [1] = "one", [2] = "two" }, strictBytes: false);
+    VerifyUnion("union_small.bin", new TextMessage { Value = "hello" });
+    VerifyUnion("union_large.bin", new LargeMessage { Value = 300 });
 }
 
 static void Write<T>(string name, T value)
@@ -137,7 +181,12 @@ static void Write<T>(string name, T value)
     File.WriteAllBytes(Path.Combine(VectorDir, name), MemoryPackSerializer.Serialize(value));
 }
 
-static void Verify<T>(string name, T expected)
+static void WriteUnion(string name, IMessage value)
+{
+    File.WriteAllBytes(Path.Combine(VectorDir, name), MemoryPackSerializer.Serialize<IMessage>(value));
+}
+
+static void Verify<T>(string name, T expected, bool strictBytes = true)
 {
     var path = Path.Combine("interop", "zig_vectors", name);
     var bytes = File.ReadAllBytes(path);
@@ -145,8 +194,31 @@ static void Verify<T>(string name, T expected)
     if (!EqualsValue(expected, actual))
         throw new InvalidOperationException($"Value mismatch for {name}");
     var roundTrip = MemoryPackSerializer.Serialize(actual);
-    if (!bytes.AsSpan().SequenceEqual(roundTrip))
+    if (strictBytes && !bytes.AsSpan().SequenceEqual(roundTrip))
         throw new InvalidOperationException($"Byte mismatch for {name}");
+}
+
+static void VerifyUnion(string name, IMessage expected)
+{
+    var path = Path.Combine("interop", "zig_vectors", name);
+    var bytes = File.ReadAllBytes(path);
+    var actual = MemoryPackSerializer.Deserialize<IMessage>(bytes);
+    if (!EqualsMessage(expected, actual))
+        throw new InvalidOperationException($"Union value mismatch for {name}");
+    var roundTrip = MemoryPackSerializer.Serialize<IMessage>(actual);
+    if (!bytes.AsSpan().SequenceEqual(roundTrip))
+        throw new InvalidOperationException($"Union byte mismatch for {name}");
+}
+
+static bool EqualsMessage(IMessage? left, IMessage? right)
+{
+    return (left, right) switch
+    {
+        (NumberMessage a, NumberMessage b) => a.Value == b.Value,
+        (TextMessage a, TextMessage b) => a.Value == b.Value,
+        (LargeMessage a, LargeMessage b) => a.Value == b.Value,
+        _ => false,
+    };
 }
 
 static bool EqualsValue<T>(T left, T right)
@@ -155,6 +227,9 @@ static bool EqualsValue<T>(T left, T right)
         return leftBytes.AsSpan().SequenceEqual(rightBytes);
     if (left is int[] leftInts && right is int[] rightInts)
         return leftInts.AsSpan().SequenceEqual(rightInts);
+    if (left is Dictionary<int, string> leftDict && right is Dictionary<int, string> rightDict)
+        return leftDict.Count == rightDict.Count && leftDict.All(pair =>
+            rightDict.TryGetValue(pair.Key, out var value) && value == pair.Value);
     return EqualityComparer<T>.Default.Equals(left, right) ||
         (left is BasicObject lb && right is BasicObject rb && lb.Id == rb.Id && lb.Name == rb.Name) ||
         (left is NestedObject ln && right is NestedObject rn && ln.Inner?.Id == rn.Inner?.Id &&
