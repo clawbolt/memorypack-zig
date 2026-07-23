@@ -55,38 +55,43 @@ pub fn main() !void {
     };
 
     var timer = nowNs();
-    var raw_bytes: []u8 = &.{};
+    var raw_len: usize = 0;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
     for (0..iterations) |_| {
-        if (raw_bytes.len != 0) gpa.free(raw_bytes);
-        raw_bytes = try memorypack.encode(gpa, raw);
-        const decoded = try memorypack.decode([64]Raw, gpa, raw_bytes);
+        _ = arena.reset(.retain_capacity);
+        const bench_gpa = arena.allocator();
+        const raw_bytes = try memorypack.encode(bench_gpa, raw);
+        raw_len = raw_bytes.len;
+        const decoded = try memorypack.decode([64]Raw, bench_gpa, raw_bytes);
         _ = decoded;
     }
     const raw_ns = nowNs() - timer;
-    defer if (raw_bytes.len != 0) gpa.free(raw_bytes);
-    report("MemoryPack unmanaged", raw_ns, raw_bytes.len, iterations);
+    report("MemoryPack unmanaged", raw_ns, raw_len, iterations);
 
     timer = nowNs();
-    var object_bytes: []u8 = &.{};
+    var object_len: usize = 0;
     for (0..iterations) |_| {
-        if (object_bytes.len != 0) gpa.free(object_bytes);
-        object_bytes = try memorypack.encode(gpa, object);
-        var decoded = try memorypack.decode([64]Object, gpa, object_bytes);
-        memorypack.deinit([64]Object, gpa, &decoded);
+        _ = arena.reset(.retain_capacity);
+        const bench_gpa = arena.allocator();
+        const object_bytes = try memorypack.encode(bench_gpa, object);
+        object_len = object_bytes.len;
+        var decoded = try memorypack.decode([64]Object, bench_gpa, object_bytes);
+        memorypack.deinit([64]Object, bench_gpa, &decoded);
     }
     const object_ns = nowNs() - timer;
-    defer if (object_bytes.len != 0) gpa.free(object_bytes);
-    report("MemoryPack object", object_ns, object_bytes.len, iterations);
+    report("MemoryPack object", object_ns, object_len, iterations);
 
     timer = nowNs();
-    var json_bytes: []u8 = &.{};
+    var json_len: usize = 0;
     for (0..iterations) |_| {
-        if (json_bytes.len != 0) gpa.free(json_bytes);
-        json_bytes = try std.json.Stringify.valueAlloc(gpa, json_object, .{});
-        var parsed = try std.json.parseFromSlice([64]JsonObject, gpa, json_bytes, .{});
+        _ = arena.reset(.retain_capacity);
+        const bench_gpa = arena.allocator();
+        const json_bytes = try std.json.Stringify.valueAlloc(bench_gpa, json_object, .{});
+        json_len = json_bytes.len;
+        var parsed = try std.json.parseFromSlice([64]JsonObject, bench_gpa, json_bytes, .{});
         parsed.deinit();
     }
     const json_ns = nowNs() - timer;
-    defer if (json_bytes.len != 0) gpa.free(json_bytes);
-    report("std.json", json_ns, json_bytes.len, iterations);
+    report("std.json", json_ns, json_len, iterations);
 }

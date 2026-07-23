@@ -173,15 +173,22 @@ Run the indicative benchmark with:
 zig build bench -Doptimize=ReleaseFast
 ```
 
-On the development machine, one sample run reported:
+The benchmark uses one retained-capacity arena allocator for each operation
+class, reset between iterations, so MemoryPack and `std.json` use comparable
+allocation/reclamation strategies. One development-machine run reported:
 
 ```text
-MemoryPack unmanaged: 336.74 MiB/s (4361 ns/op, 1540 bytes/op)
-MemoryPack object: 9.99 MiB/s (257002 ns/op, 2692 bytes/op)
-std.json: 97.38 MiB/s (29997 ns/op, 3063 bytes/op)
+MemoryPack unmanaged: 8269.17 MiB/s (178 ns/op, 1540 bytes/op)
+MemoryPack object: 342.26 MiB/s (7501 ns/op, 2692 bytes/op)
+std.json: 121.94 MiB/s (23956 ns/op, 3063 bytes/op)
 ```
 
-These numbers are machine-, allocator-, compiler-, and dataset-dependent.
+The object result is substantially faster than `std.json` under this fair
+comparison. The earlier object result was a benchmark artifact: it used the
+page allocator and freed every decoded object/string allocation individually,
+while `std.json`'s parsed representation was reclaimed through its aggregate
+parsed allocator. These numbers remain machine-, allocator-, compiler-, and
+dataset-dependent.
 
 All eight supported MemoryPack categories are now covered by the Zig tests and
 the real C# interop harness. Unsupported types produce a compile error or
