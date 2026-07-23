@@ -147,4 +147,12 @@ pub fn main() !void {
         .{ .key = 2, .value = .{ .bytes = "two" } },
     });
     try emit(gpa, []const i32, "read_only_collection.bin", &.{ 5, 6, 7 });
+    try emit(gpa, memorypack.BitArray, "bit_array.bin", .{
+        .bit_length = 10,
+        .bytes = &.{ 0xcd, 0x01 },
+    });
+    try emit(gpa, memorypack.StringBuilder, "string_builder.bin", .{
+        .value = .{ .bytes = "hello builder" },
+    });
+    try emit(gpa, memorypack.Complex, "complex.bin", .{ .real = 1.5, .imaginary = -2.25 });
 }

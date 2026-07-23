@@ -49,6 +49,12 @@ must use the same member order, widths, and MemoryPack category.
   marked `memorypack_tuple` support other arities.
 - `memorypack_ignore_<field>` and `memorypack_include_only`/
   `memorypack_include_<field>` declarations control member selection.
+- `encodeTo` writes an encoded value to any sink exposing `writeAll`;
+  `decodeFromReader` accepts any reader exposing `read` and buffers the stream
+  before using the existing slice decoder.
+- `decodeInto` overwrites an existing value. Fixed-width slices with matching
+  lengths reuse their existing allocation; other values are safely replaced
+  with ownership-aware cleanup.
 - Explicit ordering is enabled with `memorypack_explicit = true`,
   `memorypack_explicit_count`, and `memorypack_order_<field>` declarations.
 - `memorypack.Str` is the explicit Zig string type and maps to C# `string`.
@@ -122,7 +128,11 @@ host, matching the C# reference implementation.
   `DateTime` is raw `_dateData`; `DateTimeOffset` is offset minutes followed
   by local ticks; `TimeSpan` is i64 ticks; `Decimal` is flags, hi, lo, mid;
   `Version` is an Object with four i32 members; `DateOnly` is an i32 day
-  number; `TimeOnly` is an i64 tick count; and `Uri` uses String framing.
+  number; `TimeOnly` is an i64 tick count; `BitArray` uses Object header `2`,
+  an i32 bit length, a Collection count of packed u32 words, and little-endian
+  word payloads; `StringBuilder` uses positive-length UTF-16 String framing;
+  `Complex` is real f64 followed by imaginary f64; and `Uri` uses String
+  framing.
 - **Explicit layout:** fields are emitted by their numeric order and the
   member count is the configured maximum order plus one. Missing Zig slots
   emit a zero byte. MemoryPack 1.21.3 rejects non-contiguous

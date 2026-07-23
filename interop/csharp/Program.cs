@@ -1,8 +1,10 @@
 using System.Text;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
+using System.Collections;
 using System.Collections.Immutable;
 using System.Collections.ObjectModel;
+using System.Numerics;
 using MemoryPack;
 
 Directory.CreateDirectory("interop/vectors");
@@ -224,6 +226,10 @@ public static void GenerateVectors()
     Write("stack.bin", stack);
     Write("sorted_dictionary.bin", new SortedDictionary<int, string> { [1] = "one", [2] = "two" });
     Write("read_only_collection.bin", new ReadOnlyCollection<int>(new[] { 5, 6, 7 }));
+    var bits = new BitArray(new[] { true, false, true, true, false, false, true, true, true, false });
+    Write("bit_array.bin", bits);
+    Write("string_builder.bin", new StringBuilder("hello builder"));
+    Write("complex.bin", new Complex(1.5, -2.25));
 }
 
 public static void VerifyZigVectors()
@@ -291,6 +297,9 @@ public static void VerifyZigVectors()
     Verify("stack.bin", new Stack<int>(new[] { 5, 6, 7 }), strictBytes: false);
     Verify("sorted_dictionary.bin", new SortedDictionary<int, string> { [1] = "one", [2] = "two" }, strictBytes: false);
     Verify("read_only_collection.bin", new ReadOnlyCollection<int>(new[] { 5, 6, 7 }));
+    Verify("bit_array.bin", new BitArray(new[] { true, false, true, true, false, false, true, true, true, false }));
+    Verify("string_builder.bin", new StringBuilder("hello builder"));
+    Verify("complex.bin", new Complex(1.5, -2.25));
 }
 
 static void Write<T>(string name, T value)
@@ -367,6 +376,10 @@ static bool EqualsValue<T>(T left, T right)
         return leftReadOnly.SequenceEqual(rightReadOnly);
     if (left is SortedDictionary<int, string> leftSorted && right is SortedDictionary<int, string> rightSorted)
         return leftSorted.SequenceEqual(rightSorted);
+    if (left is BitArray leftBits && right is BitArray rightBits)
+        return leftBits.Cast<bool>().SequenceEqual(rightBits.Cast<bool>());
+    if (left is StringBuilder leftBuilder && right is StringBuilder rightBuilder)
+        return leftBuilder.ToString() == rightBuilder.ToString();
     if (left is Dictionary<int, string> leftDict && right is Dictionary<int, string> rightDict)
         return leftDict.Count == rightDict.Count && leftDict.All(pair =>
             rightDict.TryGetValue(pair.Key, out var value) && value == pair.Value);

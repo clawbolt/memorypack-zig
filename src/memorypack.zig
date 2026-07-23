@@ -60,7 +60,24 @@ pub const TimeOnly = struct {
     ticks: i64,
 };
 
-const BuiltinKind = enum { guid, date_time, date_time_offset, time_span, decimal, version, uri, date_only, time_only };
+pub const BitArray = struct {
+    pub const memorypack_builtin = .bit_array;
+    bit_length: i32,
+    bytes: []const u8,
+};
+
+pub const Complex = struct {
+    pub const memorypack_builtin = .complex;
+    real: f64,
+    imaginary: f64,
+};
+
+pub const StringBuilder = struct {
+    pub const memorypack_builtin = .string_builder;
+    value: Str,
+};
+
+const BuiltinKind = enum { guid, date_time, date_time_offset, time_span, decimal, version, uri, date_only, time_only, bit_array, complex, string_builder };
 
 pub fn KeyValue(comptime K: type, comptime V: type) type {
     return struct {
@@ -354,6 +371,34 @@ fn writeBuiltin(writer: *Writer, comptime T: type, value: T) Error!void {
         .uri => try writeString(writer, value.value.bytes),
         .date_only => try writePrimitive(writer, i32, value.day_number),
         .time_only => try writePrimitive(writer, i64, value.ticks),
+        .bit_array => {
+            if (value.bit_length < 0 or (@as(usize, @intCast(value.bit_length)) + 7) / 8 != value.bytes.len)
+                return error.InvalidData;
+            try append(writer, &[_]u8{2});
+            try writePrimitive(writer, i32, value.bit_length);
+            const word_count = (@as(usize, @intCast(value.bit_length)) + 31) / 32;
+            try writeI32(writer, @intCast(word_count));
+            for (0..word_count) |word| {
+                var word_value: u32 = 0;
+                const start = word * 4;
+                for (0..4) |offset| {
+                    if (start + offset < value.bytes.len)
+                        word_value |= @as(u32, value.bytes[start + offset]) << @intCast(offset * 8);
+                }
+                try writePrimitive(writer, u32, word_value);
+            }
+        },
+        .complex => {
+            try writePrimitive(writer, f64, value.real);
+            try writePrimitive(writer, f64, value.imaginary);
+        },
+        .string_builder => {
+            if (value.value.bytes.len > std.math.maxInt(i32) / 2) return error.InvalidData;
+            try writePrimitive(writer, i32, @intCast(value.value.bytes.len));
+            for (value.value.bytes) |byte| {
+                try append(writer, &[_]u8{ byte, 0 });
+            }
+        },
     }
 }
 
@@ -400,6 +445,42 @@ fn readBuiltin(reader: *Reader, comptime T: type, gpa: Allocator) Error!T {
         },
         .date_only => return .{ .day_number = try readPrimitive(reader, i32) },
         .time_only => return .{ .ticks = try readPrimitive(reader, i64) },
+        .bit_array => {
+            if ((try take(reader, 1))[0] != 2) return error.InvalidData;
+            const bit_length = try readPrimitive(reader, i32);
+            if (bit_length < 0) return error.InvalidData;
+            const byte_length = (@as(usize, @intCast(bit_length)) + 7) / 8;
+            const word_count = (@as(usize, @intCast(bit_length)) + 31) / 32;
+            const encoded_length = try readI32(reader);
+            if (encoded_length < 0 or @as(usize, @intCast(encoded_length)) != word_count) return error.InvalidData;
+            const bytes = gpa.alloc(u8, byte_length) catch return error.OutOfMemory;
+            errdefer gpa.free(bytes);
+            for (0..word_count) |word| {
+                const word_value = try readPrimitive(reader, u32);
+                const start = word * 4;
+                for (0..4) |offset| {
+                    if (start + offset < bytes.len)
+                        bytes[start + offset] = @intCast((word_value >> @intCast(offset * 8)) & 0xff);
+                }
+            }
+            return .{ .bit_length = bit_length, .bytes = bytes };
+        },
+        .complex => return .{
+            .real = try readPrimitive(reader, f64),
+            .imaginary = try readPrimitive(reader, f64),
+        },
+        .string_builder => {
+            const length = try readPrimitive(reader, i32);
+            if (length < 0) return error.InvalidData;
+            const bytes = gpa.alloc(u8, @intCast(length)) catch return error.OutOfMemory;
+            errdefer gpa.free(bytes);
+            for (bytes) |*byte| {
+                const utf16 = try take(reader, 2);
+                if (utf16[1] != 0) return error.InvalidData;
+                byte.* = utf16[0];
+            }
+            return .{ .value = .{ .bytes = bytes } };
+        },
     }
 }
 
@@ -991,6 +1072,38 @@ pub fn decode(comptime T: type, gpa: Allocator, bytes: []const u8) Error!T {
     return reader.readValue(T);
 }
 
+pub fn encodeTo(gpa: Allocator, value: anytype, sink: anytype) Error!void {
+    const bytes = try encode(gpa, value);
+    defer gpa.free(bytes);
+    sink.writeAll(bytes) catch return error.OutOfMemory;
+}
+
+pub fn decodeFromReader(comptime T: type, gpa: Allocator, reader: anytype) Error!T {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const count = reader.read(&chunk) catch return error.EndOfStream;
+        if (count == 0) break;
+        bytes.appendSlice(gpa, chunk[0..count]) catch return error.OutOfMemory;
+    }
+    return decode(T, gpa, bytes.items);
+}
+
+pub fn decodeInto(comptime T: type, gpa: Allocator, bytes: []const u8, target: *T) Error!void {
+    var replacement = try decode(T, gpa, bytes);
+    errdefer deinit(T, gpa, &replacement);
+    if (comptime @typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and isFixed(@typeInfo(T).pointer.child)) {
+        if (target.*.len == replacement.len) {
+            std.mem.copyForwards(@typeInfo(T).pointer.child, @constCast(target.*), replacement);
+            gpa.free(replacement);
+            return;
+        }
+    }
+    deinit(T, gpa, target);
+    target.* = replacement;
+}
+
 fn deinitImpl(comptime T: type, gpa: Allocator, value: *T, seen: *std.AutoHashMap(usize, void)) void {
     if (comptime isStr(T)) {
         gpa.free(value.bytes);
@@ -998,6 +1111,8 @@ fn deinitImpl(comptime T: type, gpa: Allocator, value: *T, seen: *std.AutoHashMa
     }
     if (comptime isBuiltin(T)) {
         if (comptime builtinKind(T).? == .uri) gpa.free(value.value.bytes);
+        if (comptime builtinKind(T).? == .bit_array) gpa.free(value.bytes);
+        if (comptime builtinKind(T).? == .string_builder) gpa.free(value.value.bytes);
         return;
     }
     if (comptime isMultiDimensional(T)) {
@@ -1194,6 +1309,9 @@ test "C# MemoryPack golden vectors" {
     try checkVector([]const i32, gpa, @embedFile("vectors/read_only_collection.bin"));
     try checkVector(IgnoreObject, gpa, @embedFile("vectors/ignore.bin"));
     try checkVector(IncludeObject, gpa, @embedFile("vectors/include.bin"));
+    try checkVector(BitArray, gpa, @embedFile("vectors/bit_array.bin"));
+    try checkVector(StringBuilder, gpa, @embedFile("vectors/string_builder.bin"));
+    try checkVector(Complex, gpa, @embedFile("vectors/complex.bin"));
 }
 
 test "tuple, dictionary, union, and union escape" {
@@ -1366,4 +1484,70 @@ test "multi-dimensional and member selection formats" {
     const included = try encode(gpa, IncludeObject{ .kept = 7, .included = 11 });
     defer gpa.free(included);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 2, 7, 0, 0, 0, 11, 0, 0, 0 }, included);
+}
+
+test "streaming APIs match buffer APIs and reuse slices" {
+    const gpa = std.testing.allocator;
+    const value = BasicObject{ .id = 42, .name = .{ .bytes = "stream" } };
+    const expected = try encode(gpa, value);
+    defer gpa.free(expected);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(gpa);
+    const Sink = struct {
+        list: *std.ArrayList(u8),
+        gpa: Allocator,
+        pub fn writeAll(self: @This(), bytes: []const u8) !void {
+            try self.list.appendSlice(self.gpa, bytes);
+        }
+    };
+    try encodeTo(gpa, value, Sink{ .list = &output, .gpa = gpa });
+    try std.testing.expectEqualSlices(u8, expected, output.items);
+    output.clearRetainingCapacity();
+    const primitive = try encode(gpa, @as(i32, 1234));
+    defer gpa.free(primitive);
+    try encodeTo(gpa, @as(i32, 1234), Sink{ .list = &output, .gpa = gpa });
+    try std.testing.expectEqualSlices(u8, primitive, output.items);
+    output.clearRetainingCapacity();
+    const collection = try encode(gpa, @as([]const i32, &.{ 1, 2, 3 }));
+    defer gpa.free(collection);
+    try encodeTo(gpa, @as([]const i32, &.{ 1, 2, 3 }), Sink{ .list = &output, .gpa = gpa });
+    try std.testing.expectEqualSlices(u8, collection, output.items);
+    output.clearRetainingCapacity();
+    const string = try encode(gpa, Str{ .bytes = "stream string" });
+    defer gpa.free(string);
+    try encodeTo(gpa, Str{ .bytes = "stream string" }, Sink{ .list = &output, .gpa = gpa });
+    try std.testing.expectEqualSlices(u8, string, output.items);
+    output.clearRetainingCapacity();
+    const versioned = try encode(gpa, VersionV2{ .id = 9, .name = .{ .bytes = "v" } });
+    defer gpa.free(versioned);
+    try encodeTo(gpa, VersionV2{ .id = 9, .name = .{ .bytes = "v" } }, Sink{ .list = &output, .gpa = gpa });
+    try std.testing.expectEqualSlices(u8, versioned, output.items);
+
+    const ChunkReader = struct {
+        bytes: []const u8,
+        pos: usize = 0,
+        pub fn read(self: *@This(), dest: []u8) !usize {
+            const count = @min(dest.len, self.bytes.len - self.pos);
+            @memcpy(dest[0..count], self.bytes[self.pos..][0..count]);
+            self.pos += count;
+            return count;
+        }
+    };
+    var source = ChunkReader{ .bytes = expected };
+    var decoded = try decodeFromReader(BasicObject, gpa, &source);
+    defer deinit(BasicObject, gpa, &decoded);
+    try std.testing.expectEqual(@as(i32, 42), decoded.id);
+
+    const original = try gpa.alloc(i32, 3);
+    original[0] = 1;
+    original[1] = 2;
+    original[2] = 3;
+    var slice: []const i32 = original;
+    const replacement_bytes = try encode(gpa, @as([]const i32, &.{ 4, 5, 6 }));
+    defer gpa.free(replacement_bytes);
+    try decodeInto([]const i32, gpa, replacement_bytes, &slice);
+    defer deinit([]const i32, gpa, &slice);
+    try std.testing.expect(@intFromPtr(slice.ptr) == @intFromPtr(original.ptr));
+    try std.testing.expectEqualSlices(i32, &.{ 4, 5, 6 }, slice);
 }
