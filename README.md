@@ -387,3 +387,7 @@ framing.
 For a pure-Zig application, see
 [`examples/task-cli/README.md`](examples/task-cli/README.md). It is a
 persistent command-line task manager whose store is encoded with MemoryPack.
+
+For a streaming/event-sourcing example, see
+[`examples/event-log/README.md`](examples/event-log/README.md). It appends
+framed MemoryPack events and rebuilds a bank ledger by replaying the log.

@@ -84,4 +84,17 @@ pub fn build(b: *std.Build) void {
     const run_task_cli = b.addRunArtifact(task_cli);
     if (b.args) |args| run_task_cli.addArgs(args);
     b.step("task-cli", "Run the pure-Zig MemoryPack task CLI").dependOn(&run_task_cli.step);
+
+    const event_log = b.addExecutable(.{
+        .name = "event-log",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/event-log/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "memorypack", .module = module }},
+        }),
+    });
+    const run_event_log = b.addRunArtifact(event_log);
+    if (b.args) |args| run_event_log.addArgs(args);
+    b.step("event-log", "Run the pure-Zig append-only event log").dependOn(&run_event_log.step);
 }

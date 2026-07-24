@@ -376,3 +376,7 @@ C# MemoryPack RPC 服务器和 Zig 客户端，并使用显式长度前缀分帧
 纯 Zig 应用示例见
 [`examples/task-cli/README.md`](examples/task-cli/README.md)。这是一个持久化的
 命令行任务管理器，其存储使用 MemoryPack 编码。
+
+流式 API / 事件溯源示例见
+[`examples/event-log/README.md`](examples/event-log/README.md)。它追加带帧的
+MemoryPack 事件，并通过重放日志重建银行账本状态。
