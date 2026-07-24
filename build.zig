@@ -401,14 +401,20 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("zcol/bench/bench.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{},
+        .imports = &.{
+            .{ .name = "memorypack", .module = module },
+            .{ .name = "storage", .module = zcol_storage },
+        },
     });
     const zcol_bench_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("zcol/bench/bench.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{},
+            .imports = &.{
+                .{ .name = "memorypack", .module = module },
+                .{ .name = "storage", .module = zcol_storage },
+            },
         }),
     });
     test_step.dependOn(&b.addRunArtifact(zcol_bench_tests).step);

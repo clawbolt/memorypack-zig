@@ -59,4 +59,5 @@ printf '%s\n' "$PUSH"
 printf '%s\n' "$PUSH" | grep -q 'chunks_skipped='
 printf '%s\n' "$PUSH" | grep -q 'late_materialized_bytes_saved='
 zig build zcol -- benchmark 100000
+zig build -Doptimize=ReleaseFast zcol -- benchmark large 1000000 3
 printf '%s\n' "zcol demo complete"

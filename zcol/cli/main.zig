@@ -213,7 +213,14 @@ fn stats(init: std.process.Init, allocator: std.mem.Allocator, args: *std.proces
 }
 
 fn benchmarkCommand(init: std.process.Init, allocator: std.mem.Allocator, args: *std.process.Args.Iterator) !void {
-    const rows = try std.fmt.parseInt(usize, args.next() orelse "1000000", 10);
+    const first = args.next() orelse "1000000";
+    if (std.mem.eql(u8, first, "large")) {
+        const rows = try std.fmt.parseInt(usize, args.next() orelse "1000000", 10);
+        const runs = try std.fmt.parseInt(usize, args.next() orelse "3", 10);
+        bench.printLarge(try bench.runLarge(init.io, allocator, rows, runs));
+        return;
+    }
+    const rows = try std.fmt.parseInt(usize, first, 10);
     const report = try bench.run(init.io, allocator, rows, 7);
     bench.print(report);
 }
@@ -238,6 +245,7 @@ fn demo(init: std.process.Init, allocator: std.mem.Allocator, args: *std.process
     try runQuery(init, allocator, dir, "SELECT team, SUM(amount), COUNT(*) FROM sales GROUP BY team");
     const report = try bench.run(init.io, allocator, 100000, 7);
     bench.print(report);
+    bench.printLarge(try bench.runLarge(init.io, allocator, 1000000, 3));
 }
 
 fn loadFile(init: std.process.Init, allocator: std.mem.Allocator, dir: []const u8, file_path: []const u8) !void {

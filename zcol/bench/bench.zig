@@ -1,4 +1,6 @@
 const std = @import("std");
+const memorypack = @import("memorypack");
+const storage = @import("storage");
 
 pub const Row = struct {
     id: i64,
@@ -41,6 +43,152 @@ pub const Report = struct {
     parallel_ns: u64,
     zone_chunks_skipped: usize,
 };
+
+pub const LargeReport = struct {
+    rows: usize,
+    lazy_ns: u64,
+    full_ns: u64,
+    lazy_bytes: u64,
+    full_bytes: u64,
+    lazy_segments: usize,
+    full_segments: usize,
+    lazy_sum: f64,
+    full_sum: f64,
+    serial_sum_ns: u64,
+    parallel_sum_ns: u64,
+    serial_sum: f64,
+    parallel_sum: f64,
+    scalar_simd_ns: u64,
+    vector_simd_ns: u64,
+    scalar_sum: f64,
+    vector_sum: f64,
+};
+
+const large_column_count = 16;
+
+pub fn runLarge(io: std.Io, allocator: std.mem.Allocator, rows: usize, runs: usize) !LargeReport {
+    if (rows == 0 or runs == 0) return error.InvalidInput;
+    const dir = "zig-cache/zcol-wide-bench";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const schema = largeSchema();
+    var table = try storage.Table.create(io, allocator, dir, &schema, 65536);
+    defer table.deinit();
+    const values = try allocator.alloc(f64, rows);
+    defer allocator.free(values);
+    try appendWide(allocator, &table, values, rows);
+
+    var lazy_times = try allocator.alloc(u64, runs);
+    defer allocator.free(lazy_times);
+    var full_times = try allocator.alloc(u64, runs);
+    defer allocator.free(full_times);
+    var lazy_sum: f64 = 0;
+    var full_sum: f64 = 0;
+    var lazy_bytes: u64 = 0;
+    var full_bytes: u64 = 0;
+    var lazy_segments: usize = 0;
+    var full_segments: usize = 0;
+    const metadata = try table.getChunkMeta();
+    for (0..runs) |run_index| {
+        try table.resetReadStats();
+        var started = std.Io.Clock.awake.now(io).nanoseconds;
+        var sum: f64 = 0;
+        for (metadata) |meta| {
+            var chunk = try table.readColumns(meta.id, &.{ 0, 1 });
+            defer storage.freeChunk(allocator, &chunk);
+            for (chunk.columns[0].i64, 0..) |id, row| {
+                if (id >= @as(i64, @intCast(rows / 2))) sum += chunk.columns[1].f64[row];
+            }
+        }
+        lazy_times[run_index] = @intCast(std.Io.Clock.awake.now(io).nanoseconds - started);
+        lazy_sum = sum;
+        const stats = try table.getReadStats();
+        lazy_bytes = stats.bytes_read;
+        lazy_segments = stats.segments_decoded;
+
+        try table.resetReadStats();
+        started = std.Io.Clock.awake.now(io).nanoseconds;
+        sum = 0;
+        for (metadata) |meta| {
+            var chunk = try table.readChunk(meta.id);
+            defer storage.freeChunk(allocator, &chunk);
+            for (chunk.columns[0].i64, 0..) |id, row| {
+                if (id >= @as(i64, @intCast(rows / 2))) sum += chunk.columns[1].f64[row];
+            }
+        }
+        full_times[run_index] = @intCast(std.Io.Clock.awake.now(io).nanoseconds - started);
+        full_sum = sum;
+        const full_stats = try table.getReadStats();
+        full_bytes = full_stats.bytes_read;
+        full_segments = full_stats.segments_decoded;
+    }
+    std.mem.sort(u64, lazy_times, {}, std.sort.asc(u64));
+    std.mem.sort(u64, full_times, {}, std.sort.asc(u64));
+
+    var serial_times = try allocator.alloc(u64, runs);
+    defer allocator.free(serial_times);
+    var parallel_times = try allocator.alloc(u64, runs);
+    defer allocator.free(parallel_times);
+    var scalar_times = try allocator.alloc(u64, runs);
+    defer allocator.free(scalar_times);
+    var vector_times = try allocator.alloc(u64, runs);
+    defer allocator.free(vector_times);
+    var serial_sum: f64 = 0;
+    var parallel_sum: f64 = 0;
+    var scalar_sum: f64 = 0;
+    var vector_sum: f64 = 0;
+    for (0..runs) |run_index| {
+        var started = std.Io.Clock.awake.now(io).nanoseconds;
+        var total: f64 = 0;
+        for (values) |value| total += value;
+        serial_times[run_index] = @intCast(std.Io.Clock.awake.now(io).nanoseconds - started);
+        serial_sum = total;
+        started = std.Io.Clock.awake.now(io).nanoseconds;
+        var partials: [4]f64 = .{ 0, 0, 0, 0 };
+        var workers: [4]std.Thread = undefined;
+        for (&workers, 0..) |*worker, index| worker.* = try std.Thread.spawn(.{}, benchWorker, .{ values, &partials[index], index, 4 });
+        for (workers) |worker| worker.join();
+        total = 0;
+        for (partials) |partial| total += partial;
+        parallel_times[run_index] = @intCast(std.Io.Clock.awake.now(io).nanoseconds - started);
+        parallel_sum = total;
+
+        started = std.Io.Clock.awake.now(io).nanoseconds;
+        total = 0;
+        for (values) |value| {
+            if (value >= @as(f64, @floatFromInt(rows / 2))) total += value;
+        }
+        scalar_times[run_index] = @intCast(std.Io.Clock.awake.now(io).nanoseconds - started);
+        scalar_sum = total;
+        started = std.Io.Clock.awake.now(io).nanoseconds;
+        total = vectorFilterSum(values, @floatFromInt(rows / 2));
+        vector_times[run_index] = @intCast(std.Io.Clock.awake.now(io).nanoseconds - started);
+        vector_sum = total;
+    }
+    std.mem.sort(u64, serial_times, {}, std.sort.asc(u64));
+    std.mem.sort(u64, parallel_times, {}, std.sort.asc(u64));
+    std.mem.sort(u64, scalar_times, {}, std.sort.asc(u64));
+    std.mem.sort(u64, vector_times, {}, std.sort.asc(u64));
+    return .{
+        .rows = rows,
+        .lazy_ns = lazy_times[runs / 2],
+        .full_ns = full_times[runs / 2],
+        .lazy_bytes = lazy_bytes,
+        .full_bytes = full_bytes,
+        .lazy_segments = lazy_segments,
+        .full_segments = full_segments,
+        .lazy_sum = lazy_sum,
+        .full_sum = full_sum,
+        .serial_sum_ns = serial_times[runs / 2],
+        .parallel_sum_ns = parallel_times[runs / 2],
+        .serial_sum = serial_sum,
+        .parallel_sum = parallel_sum,
+        .scalar_simd_ns = scalar_times[runs / 2],
+        .vector_simd_ns = vector_times[runs / 2],
+        .scalar_sum = scalar_sum,
+        .vector_sum = vector_sum,
+    };
+}
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, rows: usize, runs: usize) !Report {
     if (rows == 0 or runs == 0) return error.InvalidInput;
@@ -205,6 +353,86 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, rows: usize, runs: usize) !
     };
 }
 
+fn largeSchema() [large_column_count]storage.ColumnSchema {
+    return .{
+        .{ .name = .{ .bytes = "id" }, .kind = .i64 },
+        .{ .name = .{ .bytes = "amount" }, .kind = .f64 },
+        .{ .name = .{ .bytes = "i2" }, .kind = .i64 },
+        .{ .name = .{ .bytes = "f2" }, .kind = .f64 },
+        .{ .name = .{ .bytes = "i4" }, .kind = .i64 },
+        .{ .name = .{ .bytes = "f4" }, .kind = .f64 },
+        .{ .name = .{ .bytes = "i6" }, .kind = .i64 },
+        .{ .name = .{ .bytes = "f6" }, .kind = .f64 },
+        .{ .name = .{ .bytes = "i8" }, .kind = .i64 },
+        .{ .name = .{ .bytes = "f8" }, .kind = .f64 },
+        .{ .name = .{ .bytes = "i10" }, .kind = .i64 },
+        .{ .name = .{ .bytes = "f10" }, .kind = .f64 },
+        .{ .name = .{ .bytes = "i12" }, .kind = .i64 },
+        .{ .name = .{ .bytes = "f12" }, .kind = .f64 },
+        .{ .name = .{ .bytes = "category" }, .kind = .string },
+        .{ .name = .{ .bytes = "f14" }, .kind = .f64 },
+    };
+}
+
+fn appendWide(allocator: std.mem.Allocator, table: *storage.Table, values: []f64, rows: usize) !void {
+    var position: usize = 0;
+    while (position < rows) {
+        const count = @min(@as(usize, 65536), rows - position);
+        const ids = try allocator.alloc(i64, count);
+        defer allocator.free(ids);
+        const floats = try allocator.alloc(f64, count);
+        defer allocator.free(floats);
+        const strings = try allocator.alloc(memorypack.Str, count);
+        defer allocator.free(strings);
+        var columns: [large_column_count]storage.Column = undefined;
+        var int_columns: [6][]i64 = undefined;
+        var float_columns: [8][]f64 = undefined;
+        for (&int_columns, 0..) |*column, index| {
+            column.* = try allocator.alloc(i64, count);
+            for (column.*, 0..) |*value, row| value.* = @intCast(position + row + index);
+        }
+        defer for (int_columns) |column| allocator.free(column);
+        for (&float_columns, 0..) |*column, index| {
+            column.* = try allocator.alloc(f64, count);
+            for (column.*, 0..) |*value, row| value.* = @floatFromInt(position + row + index);
+        }
+        defer for (float_columns) |column| allocator.free(column);
+        for (0..count) |row| {
+            ids[row] = @intCast(position + row);
+            floats[row] = @floatFromInt(position + row);
+            values[position + row] = floats[row];
+            strings[row] = .{ .bytes = if ((position + row) % 2 == 0) "even" else "odd" };
+        }
+        columns[0] = .{ .i64 = ids };
+        columns[1] = .{ .f64 = floats };
+        for (0..6) |index| {
+            columns[index * 2 + 2] = .{ .i64 = int_columns[index] };
+            columns[index * 2 + 3] = .{ .f64 = float_columns[index] };
+        }
+        columns[14] = .{ .string = strings };
+        columns[15] = .{ .f64 = float_columns[6] };
+        _ = try table.appendChunk(&columns);
+        position += count;
+    }
+}
+
+fn vectorFilterSum(values: []const f64, threshold: f64) f64 {
+    var total: f64 = 0;
+    var index: usize = 0;
+    const threshold_vector: @Vector(4, f64) = @splat(threshold);
+    var lanes: @Vector(4, f64) = @splat(0);
+    while (index + 4 <= values.len) : (index += 4) {
+        const input: @Vector(4, f64) = values[index..][0..4].*;
+        const mask = input >= threshold_vector;
+        lanes += @select(f64, mask, input, @as(@Vector(4, f64), @splat(0)));
+    }
+    total += @reduce(.Add, lanes);
+    while (index < values.len) : (index += 1) {
+        if (values[index] >= threshold) total += values[index];
+    }
+    return total;
+}
+
 pub fn print(report: Report) void {
     const column_rows = if (report.column_ns == 0) 0 else @as(u64, report.rows) * 1_000_000_000 / report.column_ns;
     const row_rows = if (report.row_ns == 0) 0 else @as(u64, report.rows) * 1_000_000_000 / report.row_ns;
@@ -214,10 +442,26 @@ pub fn print(report: Report) void {
     );
 }
 
+pub fn printLarge(report: LargeReport) void {
+    std.debug.print(
+        "wide benchmark rows={d} columns={d}\n  lazy decode: median_ns={d} bytes_read={d} segments_decoded={d} sum={d:.2}\n  full decode:  median_ns={d} bytes_read={d} segments_decoded={d} sum={d:.2}\n  parallel sum serial: median_ns={d} sum={d:.2}\n  parallel sum 4t:     median_ns={d} sum={d:.2}\n  SIMD scalar:         median_ns={d} sum={d:.2}\n  SIMD vector:         median_ns={d} sum={d:.2}\n",
+        .{ report.rows, large_column_count, report.lazy_ns, report.lazy_bytes, report.lazy_segments, report.lazy_sum, report.full_ns, report.full_bytes, report.full_segments, report.full_sum, report.serial_sum_ns, report.serial_sum, report.parallel_sum_ns, report.parallel_sum, report.scalar_simd_ns, report.scalar_sum, report.vector_simd_ns, report.vector_sum },
+    );
+}
+
 test "benchmark paths produce identical aggregates" {
     const report = try run(std.testing.io, std.testing.allocator, 1000, 3);
     try std.testing.expectEqual(report.column_sum, report.row_sum);
     try std.testing.expect(report.row_bytes > report.column_bytes);
     try std.testing.expectEqual(report.group_column_sum, report.group_row_sum);
     try std.testing.expect(report.null_sum > 0);
+}
+
+test "large lazy benchmark matches full decode reference" {
+    const report = try runLarge(std.testing.io, std.testing.allocator, 4096, 1);
+    try std.testing.expectEqual(report.lazy_sum, report.full_sum);
+    try std.testing.expectEqual(report.serial_sum, report.parallel_sum);
+    try std.testing.expectEqual(report.scalar_sum, report.vector_sum);
+    try std.testing.expect(report.lazy_bytes < report.full_bytes);
+    try std.testing.expect(report.lazy_segments < report.full_segments);
 }

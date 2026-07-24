@@ -140,6 +140,27 @@ sum was 1.20x faster in this run, while the join probe is a simple baseline
 probe rather than a claim about all join workloads. Results vary with CPU,
 Zig version, and process load.
 
+The at-scale wide-table benchmark uses 1,000,000 rows, 16 mixed-type columns,
+16 chunks, and three measured runs. It reads only `id` and `amount` for the
+lazy query and compares that with decoding every column:
+
+```text
+wide benchmark rows=1000000 columns=16
+  lazy decode: median_ns=42239156 bytes_read=16251024 segments_decoded=32 sum=374999750000.00
+  full decode:  median_ns=399697134 bytes_read=137508560 segments_decoded=256 sum=374999750000.00
+  parallel sum serial: median_ns=716392 sum=499999500000.00
+  parallel sum 4t:     median_ns=973243 sum=499999500000.00
+  SIMD scalar:         median_ns=1063824 sum=374999750000.00
+  SIMD vector:         median_ns=228581 sum=374999750000.00
+```
+
+At this scale, lazy decoding read 8.46x fewer bytes and was 9.47x faster than
+full-chunk decoding for the narrow query. Four-thread reduction was still
+0.74x the serial speed, so the conservative threaded query threshold remains
+appropriate. The vector SIMD path was 4.65x faster than the scalar filtered
+sum in this run. These are local ReleaseFast measurements, not universal
+hardware guarantees.
+
 ## CLI and demo
 
 Commands are `create-table`, `load`, `query`, `describe`, `stats`, and
@@ -150,8 +171,9 @@ Commands are `create-table`, `load`, `query`, `describe`, `stats`, and
 ```
 
 It creates a two-chunk table, loads nullable CSV, prints filtered, null,
-composite-grouped, and joined results, shows storage statistics, and runs the
-benchmark with assertions on known answers.
+composite-grouped, and joined results, shows storage statistics, and runs both
+the 100k microbenchmark and the 1M-row wide-table benchmark with assertions on
+known answers.
 
 ## Limitations
 
@@ -160,8 +182,9 @@ benchmark with assertions on known answers.
 - Threaded query execution currently applies to ungrouped floating-point SUM
   plans. Grouped and filtered aggregate plans remain serial unless they match
   that specialized path.
-- Late materialization avoids gathering non-projected values after selection;
-  chunk files are still decoded as complete MemoryPack objects.
+- Lazy decoding is file-level for predicate, projection, grouping, and
+  aggregate columns; window and join paths still materialize the source
+  columns needed by their execution algorithms.
 - No transactions or concurrent writer protocol.
 - One `ORDER BY` key and numeric aggregates.
 - The benchmark is an executable microbenchmark, not a full query optimizer or
