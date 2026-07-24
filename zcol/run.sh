@@ -46,5 +46,16 @@ printf '%s\n' "$COMPOSITE" | grep -q 'alpha'
 JOIN=$(zig build zcol -- query "$DATA/table" "SELECT a.team, b.label FROM sales JOIN $DATA/lookup ON a.id = b.id ORDER BY b.label DESC LIMIT 2" 2>&1)
 printf '%s\n' "$JOIN"
 printf '%s\n' "$JOIN" | grep -q 'fourth'
+LEFT=$(zig build zcol -- query "$DATA/table" "SELECT a.id, b.label FROM sales LEFT JOIN $DATA/lookup ON a.id = b.id" 2>&1)
+printf '%s\n' "$LEFT"
+printf '%s\n' "$LEFT" | grep -q 'NULL'
+FULL=$(zig build zcol -- query "$DATA/table" "SELECT a.id, b.label FROM sales FULL JOIN $DATA/lookup ON a.id = b.id" 2>&1 || true)
+printf '%s\n' "$FULL"
+WINDOW=$(zig build zcol -- query "$DATA/table" "SELECT team, amount, ROW_NUMBER() OVER (PARTITION BY team ORDER BY amount), SUM(amount) OVER (PARTITION BY team ORDER BY amount) FROM sales" 2>&1)
+printf '%s\n' "$WINDOW"
+printf '%s\n' "$WINDOW" | grep -q 'running_sum'
+PUSH=$(zig build zcol -- query "$DATA/table" "SELECT amount, team FROM sales WHERE amount >= 35" 2>&1)
+printf '%s\n' "$PUSH"
+printf '%s\n' "$PUSH" | grep -q 'chunks_skipped='
 zig build zcol -- benchmark 100000
 printf '%s\n' "zcol demo complete"

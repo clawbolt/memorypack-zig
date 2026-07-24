@@ -100,6 +100,7 @@ fn query(init: std.process.Init, allocator: std.mem.Allocator, args: *std.proces
         std.debug.print("\n", .{});
     }
     std.debug.print("rows={d}\n", .{result.rows.len});
+    std.debug.print("chunks_scanned={d} chunks_skipped={d}\n", .{ result.chunks_scanned, result.chunks_skipped });
 }
 
 fn windowQuery(init: std.process.Init, allocator: std.mem.Allocator, dir: []const u8, text: []const u8) !void {
@@ -154,7 +155,7 @@ fn joinQuery(init: std.process.Init, allocator: std.mem.Allocator, left_dir: []c
         projections[index] = .{ .left = !is_right, .column = column_index, .name = .{ .bytes = column.bytes } };
     }
     const order = if (plan.order_by) |order_column| findProjection(projections, order_column.bytes) else null;
-    var result = try exec.executeJoin(allocator, &left, &right, .{ .left_key = left_key, .right_key = right_key, .projection = projections, .order_by = order, .order_desc = plan.order_desc, .limit = plan.limit });
+    var result = try exec.executeJoin(allocator, &left, &right, .{ .left_key = left_key, .right_key = right_key, .projection = projections, .kind = plan.join_kind, .order_by = order, .order_desc = plan.order_desc, .limit = plan.limit });
     defer result.deinit();
     for (result.columns) |column| std.debug.print("{s}\t", .{column.bytes});
     std.debug.print("\n", .{});

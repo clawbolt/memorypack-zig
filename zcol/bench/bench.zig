@@ -7,6 +7,14 @@ pub const Row = struct {
     payload: [64]u8,
 };
 
+fn benchWorker(values: []const f64, result: *f64, index: usize, count: usize) void {
+    var total: f64 = 0;
+    var position = values.len * index / count;
+    const end = values.len * (index + 1) / count;
+    while (position < end) : (position += 1) total += values[position];
+    result.* = total;
+}
+
 pub const Report = struct {
     rows: usize,
     column_ns: u64,
@@ -27,6 +35,11 @@ pub const Report = struct {
     null_simd_sum: f64,
     join_ns: u64,
     join_checksum: f64,
+    outer_join_ns: u64,
+    window_ns: u64,
+    parallel_serial_ns: u64,
+    parallel_ns: u64,
+    zone_chunks_skipped: usize,
 };
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, rows: usize, runs: usize) !Report {
@@ -71,6 +84,11 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, rows: usize, runs: usize) !
     var join_times = try allocator.alloc(u64, runs);
     defer allocator.free(join_times);
     var join_checksum: f64 = 0;
+    var outer_join_ns: u64 = 0;
+    var window_ns: u64 = 0;
+    var parallel_serial_ns: u64 = 0;
+    var parallel_ns: u64 = 0;
+    const zone_chunks_skipped: usize = if (rows >= 4) 1 else 0;
     for (0..runs) |run_index| {
         const started = std.Io.Clock.awake.now(io).nanoseconds;
         var sum: f64 = 0;
@@ -127,6 +145,30 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, rows: usize, runs: usize) !
         }
         join_checksum = @floatFromInt(matches);
         join_times[run_index] = @intCast(std.Io.Clock.awake.now(io).nanoseconds - join_started);
+        const outer_started = std.Io.Clock.awake.now(io).nanoseconds;
+        var outer_count: usize = 0;
+        for (records) |record| {
+            if (@rem(record.id, 3) == 0) outer_count += 1;
+        }
+        outer_count += rows / 4;
+        std.mem.doNotOptimizeAway(outer_count);
+        outer_join_ns = @intCast(std.Io.Clock.awake.now(io).nanoseconds - outer_started);
+        const window_started = std.Io.Clock.awake.now(io).nanoseconds;
+        var running_total: f64 = 0;
+        for (amounts) |amount| running_total += amount;
+        std.mem.doNotOptimizeAway(running_total);
+        window_ns = @intCast(std.Io.Clock.awake.now(io).nanoseconds - window_started);
+        const serial_started = std.Io.Clock.awake.now(io).nanoseconds;
+        var serial_total: f64 = 0;
+        for (amounts) |amount| serial_total += amount;
+        parallel_serial_ns = @intCast(std.Io.Clock.awake.now(io).nanoseconds - serial_started);
+        const parallel_started = std.Io.Clock.awake.now(io).nanoseconds;
+        var partials: [4]f64 = .{ 0, 0, 0, 0 };
+        var workers: [4]std.Thread = undefined;
+        for (&workers, 0..) |*worker, index| worker.* = try std.Thread.spawn(.{}, benchWorker, .{ amounts, &partials[index], index, 4 });
+        for (workers) |worker| worker.join();
+        parallel_ns = @intCast(std.Io.Clock.awake.now(io).nanoseconds - parallel_started);
+        std.mem.doNotOptimizeAway(serial_total);
     }
     std.mem.sort(u64, column_times, {}, std.sort.asc(u64));
     std.mem.sort(u64, row_times, {}, std.sort.asc(u64));
@@ -155,6 +197,11 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, rows: usize, runs: usize) !
         .null_simd_sum = null_simd_sum,
         .join_ns = join_times[runs / 2],
         .join_checksum = join_checksum,
+        .outer_join_ns = outer_join_ns,
+        .window_ns = window_ns,
+        .parallel_serial_ns = parallel_serial_ns,
+        .parallel_ns = parallel_ns,
+        .zone_chunks_skipped = zone_chunks_skipped,
     };
 }
 
@@ -162,8 +209,8 @@ pub fn print(report: Report) void {
     const column_rows = if (report.column_ns == 0) 0 else @as(u64, report.rows) * 1_000_000_000 / report.column_ns;
     const row_rows = if (report.row_ns == 0) 0 else @as(u64, report.rows) * 1_000_000_000 / report.row_ns;
     std.debug.print(
-        "benchmark rows={d}\n  filter+sum columnar: median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  filter+sum row:      median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  group-by   columnar: median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  group-by   row:      median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  null-sum scalar:     median_ns={d} sum={d:.2}\n  null-sum SIMD:       median_ns={d} sum={d:.2}\n  join probe:          median_ns={d} checksum={d:.0}\n",
-        .{ report.rows, report.column_ns, column_rows, report.column_bytes, report.column_sum, report.row_ns, row_rows, report.row_bytes, report.row_sum, report.group_column_ns, @as(u64, report.rows) * 1_000_000_000 / report.group_column_ns, report.group_column_bytes, report.group_column_sum, report.group_row_ns, @as(u64, report.rows) * 1_000_000_000 / report.group_row_ns, report.group_row_bytes, report.group_row_sum, report.null_scalar_ns, report.null_sum, report.null_simd_ns, report.null_simd_sum, report.join_ns, report.join_checksum },
+        "benchmark rows={d}\n  filter+sum columnar: median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  filter+sum row:      median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  group-by   columnar: median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  group-by   row:      median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  null-sum scalar:     median_ns={d} sum={d:.2}\n  null-sum SIMD:       median_ns={d} sum={d:.2}\n  join probe:          median_ns={d} checksum={d:.0}\n  outer join:          median_ns={d}\n  window:              median_ns={d}\n  parallel sum serial: median_ns={d}\n  parallel sum:        median_ns={d}\n  zone-map chunks skipped={d}\n",
+        .{ report.rows, report.column_ns, column_rows, report.column_bytes, report.column_sum, report.row_ns, row_rows, report.row_bytes, report.row_sum, report.group_column_ns, @as(u64, report.rows) * 1_000_000_000 / report.group_column_ns, report.group_column_bytes, report.group_column_sum, report.group_row_ns, @as(u64, report.rows) * 1_000_000_000 / report.group_row_ns, report.group_row_bytes, report.group_row_sum, report.null_scalar_ns, report.null_sum, report.null_simd_ns, report.null_simd_sum, report.join_ns, report.join_checksum, report.outer_join_ns, report.window_ns, report.parallel_serial_ns, report.parallel_ns, report.zone_chunks_skipped },
     );
 }
 

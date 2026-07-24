@@ -50,8 +50,15 @@ The executor reads one chunk at a time, allocates a boolean selection vector,
 and evaluates each predicate over the relevant typed slice. Projection copies
 only selected values. Aggregates maintain typed-independent numeric state for
 `count`, `sum`, `min`, `max`, and `avg`; grouping uses composite hash keys,
-including null components and dictionary codes. A single-key hash inner join,
-one-key `ORDER BY`, and `LIMIT` are also available.
+including null components and dictionary codes. Composite-key inner and
+left/right/full outer joins, one-key `ORDER BY`, `LIMIT`, and window ranking
+with running aggregates are available.
+
+Every chunk persists zone maps (textual min/max plus null count) in its
+version-tolerant manifest metadata. Selective numeric predicates skip
+impossible chunks and report scan/skip counts. The executor also exposes a
+deterministic threaded numeric reduction; inputs below a few thousand values
+fall back to scalar execution.
 
 ## SQL subset
 
@@ -59,11 +66,23 @@ one-key `ORDER BY`, and `LIMIT` are also available.
 SELECT <column[, ...] | aggregate[, ...]>
 FROM <table>
 [WHERE <column> <op> <literal> [AND ...]]
-[JOIN <table> ON a.key = b.key]
+[LEFT|RIGHT|FULL] JOIN <table> ON a.key = b.key [AND a.key2 = b.key2]
 [GROUP BY <column>[, ...]]
 [ORDER BY <column> [ASC|DESC]]
 [LIMIT n]
 ```
+
+Window expressions use a running frame from the start of each partition:
+
+```text
+ROW_NUMBER() OVER (PARTITION BY team ORDER BY amount)
+SUM(amount) OVER (PARTITION BY team ORDER BY amount)
+```
+
+`RANK` includes gaps after ties and `DENSE_RANK` does not. Null join keys
+never match; unmatched outer-join projections are NULL. Ordinary comparisons
+return no rows for NULL, while aggregates ignore NULL values (`COUNT(*)`
+still counts rows). `IS NULL` and `IS NOT NULL` are supported.
 
 Operators are `=`, `<`, `<=`, `>`, `>=`, and `!=` for numeric values; string
 and boolean equality are supported. Aggregates are `COUNT(*)`, `SUM`, `MIN`,
@@ -98,8 +117,11 @@ benchmark rows=100000
   null-sum scalar:     median_ns=43342 sum=42814715.00
   null-sum SIMD:       median_ns=36222 sum=42814715.00
   join probe:          median_ns=213057 checksum=100000
-  null-sum scalar:     median_ns=193067 sum=42814715.00
-  null-sum SIMD:       median_ns=171732 sum=42814715.00
+  outer join:          median_ns=...
+  window:              median_ns=...
+  parallel sum serial: median_ns=...
+  parallel sum:        median_ns=...
+  zone-map chunks skipped=1
 ```
 
 These runs measured 1.80x and 4.32x columnar latency advantages for filter+sum
@@ -123,8 +145,10 @@ benchmark with assertions on known answers.
 
 ## Limitations
 
-- Only inner, single-key joins; no subqueries, windows, or distributed
-  execution.
+- Joins are equi-joins; window frames are limited to running partition-start
+  frames and there are no subqueries or distributed execution.
+- Threaded reduction is currently exposed as a numeric reduction primitive;
+  general grouped plans remain deterministic serial scans.
 - No transactions or concurrent writer protocol.
 - One `ORDER BY` key and numeric aggregates.
 - The benchmark is an executable microbenchmark, not a full query optimizer or

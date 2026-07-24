@@ -538,6 +538,10 @@ fn lessRows(context: SortContext, left: Row, right: Row) bool {
     return if (context.descending) result > 0 else result < 0;
 }
 fn compareValue(left: Value, right: Value) i8 {
+    if (left == .null or right == .null) {
+        if (left == .null and right == .null) return 0;
+        return if (left == .null) -1 else 1;
+    }
     return switch (left) {
         .i64 => |value| if (value < right.i64) -1 else if (value > right.i64) 1 else 0,
         .f64 => |value| if (value < right.f64) -1 else if (value > right.f64) 1 else 0,

@@ -67,6 +67,7 @@ pub const Plan = struct {
     join_table: ?memorypack.Str = null,
     join_left: ?memorypack.Str = null,
     join_right: ?memorypack.Str = null,
+    join_kind: exec.JoinKind = .inner,
 
     pub fn deinit(self: *Plan) void {
         self.allocator.free(self.table.bytes);
@@ -260,7 +261,18 @@ fn parseJoin(allocator: std.mem.Allocator, text: []const u8) ParseError!Plan {
         token = tokens.next() orelse return error.ExpectedFrom;
     }
     const table = tokens.next() orelse return error.MissingTable;
-    if (!std.ascii.eqlIgnoreCase(tokens.next() orelse return error.TrailingTokens, "JOIN")) return error.TrailingTokens;
+    const join_keyword = tokens.next() orelse return error.TrailingTokens;
+    var join_kind: exec.JoinKind = .inner;
+    if (std.ascii.eqlIgnoreCase(join_keyword, "LEFT")) {
+        join_kind = .left;
+        if (!std.ascii.eqlIgnoreCase(tokens.next() orelse return error.TrailingTokens, "JOIN")) return error.TrailingTokens;
+    } else if (std.ascii.eqlIgnoreCase(join_keyword, "RIGHT")) {
+        join_kind = .right;
+        if (!std.ascii.eqlIgnoreCase(tokens.next() orelse return error.TrailingTokens, "JOIN")) return error.TrailingTokens;
+    } else if (std.ascii.eqlIgnoreCase(join_keyword, "FULL")) {
+        join_kind = .full;
+        if (!std.ascii.eqlIgnoreCase(tokens.next() orelse return error.TrailingTokens, "JOIN")) return error.TrailingTokens;
+    } else if (!std.ascii.eqlIgnoreCase(join_keyword, "JOIN")) return error.TrailingTokens;
     const join_table = tokens.next() orelse return error.MissingTable;
     if (!std.ascii.eqlIgnoreCase(tokens.next() orelse return error.TrailingTokens, "ON")) return error.TrailingTokens;
     const join_left = tokens.next() orelse return error.InvalidPredicate;
@@ -294,6 +306,7 @@ fn parseJoin(allocator: std.mem.Allocator, text: []const u8) ParseError!Plan {
         .join_table = .{ .bytes = try allocator.dupe(u8, join_table) },
         .join_left = .{ .bytes = try allocator.dupe(u8, join_left) },
         .join_right = .{ .bytes = try allocator.dupe(u8, join_right) },
+        .join_kind = join_kind,
     };
 }
 
