@@ -30,7 +30,33 @@ pub const Query = struct {
     order_by: ?usize = null,
     order_desc: bool = false,
     limit: ?usize = null,
+    pushdown: bool = true,
+    threads: usize = 1,
 };
+pub fn parallelSumF64(allocator: std.mem.Allocator, values: []const f64, thread_count: usize) !f64 {
+    if (thread_count <= 1 or values.len < 4096) return scalarSumF64(values);
+    const count = @min(thread_count, values.len);
+    const contexts = try allocator.alloc(ParallelSumContext, count);
+    defer allocator.free(contexts);
+    const threads = try allocator.alloc(std.Thread, count);
+    defer allocator.free(threads);
+    for (0..count) |index| {
+        const start = values.len * index / count;
+        const end = values.len * (index + 1) / count;
+        contexts[index] = .{ .values = values, .start = start, .end = end };
+        threads[index] = try std.Thread.spawn(.{}, parallelSumWorker, .{&contexts[index]});
+    }
+    var total: f64 = 0;
+    for (threads, 0..) |thread, index| {
+        thread.join();
+        total += contexts[index].result;
+    }
+    return total;
+}
+const ParallelSumContext = struct { values: []const f64, start: usize, end: usize, result: f64 = 0 };
+fn parallelSumWorker(context: *ParallelSumContext) void {
+    context.result = scalarSumF64(context.values[context.start..context.end]);
+}
 pub const Value = Scalar;
 pub const Row = []Value;
 pub const JoinProjection = struct {
@@ -102,6 +128,8 @@ pub const Result = struct {
     rows: []Row,
     storage_rows: []Row = &.{},
     storage_visible_len: usize = 0,
+    chunks_scanned: usize = 0,
+    chunks_skipped: usize = 0,
 
     pub fn deinit(self: *Result) void {
         for (self.columns) |column| self.allocator.free(column.bytes);
@@ -381,8 +409,14 @@ pub fn execute(allocator: std.mem.Allocator, table: *storage.Table, query: Query
         group_map.deinit();
     }
     const chunks = try table.stats();
+    const metadata = try table.getChunkMeta();
     var chunk_id: u32 = 0;
     while (chunk_id < chunks.chunks) : (chunk_id += 1) {
+        if (query.pushdown and canSkipChunk(metadata[chunk_id], schema, query.predicates)) {
+            result.chunks_skipped += 1;
+            continue;
+        }
+        result.chunks_scanned += 1;
         var chunk = try table.readChunk(chunk_id);
         defer storage.freeChunk(allocator, &chunk);
         const row_count = columnLength(chunk.columns[0]);
@@ -465,6 +499,37 @@ pub fn execute(allocator: std.mem.Allocator, table: *storage.Table, query: Query
         result.storage_visible_len = limit;
     };
     return result;
+}
+
+fn canSkipChunk(meta: storage.ChunkMeta, schema: []const storage.ColumnSchema, predicates: []const Predicate) bool {
+    for (predicates) |predicate| {
+        if (predicate.column >= meta.zone_maps.len) continue;
+        const zone = meta.zone_maps[predicate.column];
+        if (predicate.null_check != null) {
+            if (predicate.null_check.? and zone.null_count == 0) return true;
+            if (!predicate.null_check.? and zone.null_count == meta.rows) return true;
+            continue;
+        }
+        if (zone.null_count == meta.rows) return true;
+        const kind = schema[predicate.column].kind;
+        if (kind != .i64 and kind != .f64) continue;
+        const value = switch (predicate.value) {
+            .i64 => |number| @as(f64, @floatFromInt(number)),
+            .f64 => |number| number,
+            else => continue,
+        };
+        const low = std.fmt.parseFloat(f64, zone.min.bytes) catch continue;
+        const high = std.fmt.parseFloat(f64, zone.max.bytes) catch continue;
+        switch (predicate.op) {
+            .eq => if (value < low or value > high) return true,
+            .lt => if (low >= value) return true,
+            .lte => if (low > value) return true,
+            .gt => if (high <= value) return true,
+            .gte => if (high < value) return true,
+            .neq => {},
+        }
+    }
+    return false;
 }
 
 const SortContext = struct { column: usize, descending: bool };
@@ -842,4 +907,34 @@ test "window ranking and running sums respect partitions and ties" {
     try std.testing.expectEqual(@as(i64, 3), result.rows[2][4].i64);
     try std.testing.expectEqual(@as(i64, 2), result.rows[2][5].i64);
     try std.testing.expectEqual(@as(f64, 35), result.rows[2][6].f64);
+}
+
+test "zone maps skip impossible chunks without changing results" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const dir = "zig-cache/zcol-zones";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const schema = [_]storage.ColumnSchema{.{ .name = .{ .bytes = "amount" }, .kind = .f64 }};
+    var table = try storage.Table.create(io, allocator, dir, &schema, 2);
+    defer table.deinit();
+    _ = try table.appendChunk(&.{.{ .f64 = &.{ 1, 2 } }});
+    _ = try table.appendChunk(&.{.{ .f64 = &.{ 100, 101 } }});
+    const predicates = [_]Predicate{.{ .column = 0, .op = .gte, .value = .{ .f64 = 50 } }};
+    var pushed = try execute(allocator, &table, .{ .projection = &.{0}, .predicates = &predicates });
+    defer pushed.deinit();
+    var serial = try execute(allocator, &table, .{ .projection = &.{0}, .predicates = &predicates, .pushdown = false });
+    defer serial.deinit();
+    try std.testing.expectEqual(@as(usize, 1), pushed.chunks_skipped);
+    try std.testing.expectEqual(@as(usize, 1), pushed.chunks_scanned);
+    try std.testing.expectEqual(serial.rows.len, pushed.rows.len);
+    try std.testing.expectEqual(@as(f64, 100), pushed.rows[0][0].f64);
+}
+
+test "parallel numeric reduction matches serial reduction" {
+    const allocator = std.testing.allocator;
+    const values = try allocator.alloc(f64, 8192);
+    defer allocator.free(values);
+    for (values, 0..) |*value, index| value.* = @floatFromInt(index % 17);
+    try std.testing.expectEqual(scalarSumF64(values), try parallelSumF64(allocator, values, 4));
 }

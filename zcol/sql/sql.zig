@@ -24,6 +24,30 @@ pub const SelectItem = union(enum) {
         column: memorypack.Str,
     },
 };
+pub const WindowFunction = struct {
+    kind: exec.WindowKind,
+    value_column: ?memorypack.Str = null,
+};
+pub const WindowPlan = struct {
+    allocator: std.mem.Allocator,
+    table: memorypack.Str,
+    projection: []memorypack.Str,
+    partition_by: []memorypack.Str,
+    order_by: memorypack.Str,
+    order_desc: bool,
+    functions: []WindowFunction,
+
+    pub fn deinit(self: *WindowPlan) void {
+        self.allocator.free(self.table.bytes);
+        for (self.projection) |column| self.allocator.free(column.bytes);
+        self.allocator.free(self.projection);
+        for (self.partition_by) |column| self.allocator.free(column.bytes);
+        self.allocator.free(self.partition_by);
+        self.allocator.free(self.order_by.bytes);
+        for (self.functions) |function| if (function.value_column) |column| self.allocator.free(column.bytes);
+        self.allocator.free(self.functions);
+    }
+};
 pub const Predicate = struct {
     column: memorypack.Str,
     op: exec.CompareOp,
@@ -67,6 +91,61 @@ pub const Plan = struct {
         if (self.join_right) |join| self.allocator.free(join.bytes);
     }
 };
+
+pub fn parseWindow(allocator: std.mem.Allocator, text: []const u8) ParseError!WindowPlan {
+    const from_marker = std.mem.indexOf(u8, text, " FROM ") orelse return error.ExpectedFrom;
+    const select_text = text[7..from_marker];
+    const table_text = text[from_marker + 6 ..];
+    const over_marker = std.mem.indexOf(u8, select_text, " OVER ") orelse return error.InvalidProjection;
+    const over_text = select_text[over_marker + 6 ..];
+    const partition_marker = std.mem.indexOf(u8, over_text, "PARTITION BY ") orelse return error.InvalidProjection;
+    const order_marker = std.mem.indexOf(u8, over_text, " ORDER BY ") orelse return error.InvalidProjection;
+    const partition_text = over_text[partition_marker + 13 .. order_marker];
+    const order_text = over_text[order_marker + 10 ..];
+    const close = std.mem.indexOfScalar(u8, order_text, ')') orelse order_text.len;
+    const order_name = std.mem.trim(u8, order_text[0..close], " ()");
+    var projection: std.ArrayList(memorypack.Str) = .empty;
+    var partition: std.ArrayList(memorypack.Str) = .empty;
+    var functions: std.ArrayList(WindowFunction) = .empty;
+    errdefer {
+        for (projection.items) |column| allocator.free(column.bytes);
+        projection.deinit(allocator);
+        for (partition.items) |column| allocator.free(column.bytes);
+        partition.deinit(allocator);
+        for (functions.items) |function| if (function.value_column) |column| allocator.free(column.bytes);
+        functions.deinit(allocator);
+    }
+    var select_tokens = std.mem.splitSequence(u8, select_text[0..over_marker], ",");
+    while (select_tokens.next()) |token| {
+        const name = std.mem.trim(u8, token, " \t\r\n");
+        if (name.len > 0) try projection.append(allocator, .{ .bytes = try allocator.dupe(u8, name) });
+    }
+    var partition_tokens = std.mem.splitSequence(u8, partition_text, ",");
+    while (partition_tokens.next()) |token| {
+        const name = std.mem.trim(u8, token, " \t\r\n");
+        if (name.len > 0) try partition.append(allocator, .{ .bytes = try allocator.dupe(u8, name) });
+    }
+    if (std.mem.indexOf(u8, select_text, "ROW_NUMBER()") != null) try functions.append(allocator, .{ .kind = .row_number });
+    if (std.mem.indexOf(u8, select_text, "RANK()") != null) try functions.append(allocator, .{ .kind = .rank });
+    if (std.mem.indexOf(u8, select_text, "DENSE_RANK()") != null) try functions.append(allocator, .{ .kind = .dense_rank });
+    for ([_]struct { marker: []const u8, kind: exec.WindowKind }{
+        .{ .marker = "SUM(", .kind = .running_sum },
+        .{ .marker = "AVG(", .kind = .running_avg },
+        .{ .marker = "COUNT(", .kind = .running_count },
+    }) |entry| if (std.mem.indexOf(u8, select_text, entry.marker)) |start| {
+        const end = std.mem.indexOfScalarPos(u8, select_text, start + entry.marker.len, ')') orelse return error.InvalidProjection;
+        try functions.append(allocator, .{ .kind = entry.kind, .value_column = .{ .bytes = try allocator.dupe(u8, std.mem.trim(u8, select_text[start + entry.marker.len .. end], " \t")) } });
+    };
+    return .{
+        .allocator = allocator,
+        .table = .{ .bytes = try allocator.dupe(u8, std.mem.trim(u8, table_text, " \t\r\n")) },
+        .projection = try projection.toOwnedSlice(allocator),
+        .partition_by = try partition.toOwnedSlice(allocator),
+        .order_by = .{ .bytes = try allocator.dupe(u8, order_name) },
+        .order_desc = false,
+        .functions = try functions.toOwnedSlice(allocator),
+    };
+}
 
 pub fn parse(allocator: std.mem.Allocator, text: []const u8) ParseError!Plan {
     if (std.mem.indexOf(u8, text, " JOIN ") != null) return parseJoin(allocator, text);

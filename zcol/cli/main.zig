@@ -79,6 +79,7 @@ fn load(init: std.process.Init, allocator: std.mem.Allocator, args: *std.process
 fn query(init: std.process.Init, allocator: std.mem.Allocator, args: *std.process.Args.Iterator) !void {
     const dir = args.next() orelse return error.InvalidInput;
     const text = args.next() orelse return error.InvalidInput;
+    if (std.mem.indexOf(u8, text, "OVER") != null) return windowQuery(init, allocator, dir, text);
     var table = try storage.Table.open(init.io, allocator, dir);
     defer table.deinit();
     var plan = try sql.parse(allocator, text);
@@ -99,6 +100,36 @@ fn query(init: std.process.Init, allocator: std.mem.Allocator, args: *std.proces
         std.debug.print("\n", .{});
     }
     std.debug.print("rows={d}\n", .{result.rows.len});
+}
+
+fn windowQuery(init: std.process.Init, allocator: std.mem.Allocator, dir: []const u8, text: []const u8) !void {
+    var plan = try sql.parseWindow(allocator, text);
+    defer plan.deinit();
+    var table = try storage.Table.open(init.io, allocator, dir);
+    defer table.deinit();
+    const schema = try table.getSchema();
+    var partitions = try allocator.alloc(usize, plan.partition_by.len);
+    defer allocator.free(partitions);
+    for (plan.partition_by, 0..) |column, index| partitions[index] = findSchemaColumn(schema, column.bytes) orelse return error.ColumnNotFound;
+    const order = findSchemaColumn(schema, plan.order_by.bytes) orelse return error.ColumnNotFound;
+    var functions = try allocator.alloc(exec.WindowKind, plan.functions.len);
+    defer allocator.free(functions);
+    var value_column: ?usize = null;
+    for (plan.functions, 0..) |function, index| {
+        functions[index] = function.kind;
+        if (function.value_column) |column| value_column = findSchemaColumn(schema, column.bytes) orelse return error.ColumnNotFound;
+    }
+    var result = try exec.executeWindow(allocator, &table, .{ .partition_by = partitions, .order_by = order, .value_column = value_column, .functions = functions });
+    defer result.deinit();
+    for (result.columns) |column| std.debug.print("{s}\t", .{column.bytes});
+    std.debug.print("\n", .{});
+    for (result.rows) |row| {
+        for (row) |value| {
+            printValue(value);
+            std.debug.print("\t", .{});
+        }
+        std.debug.print("\n", .{});
+    }
 }
 
 fn joinQuery(init: std.process.Init, allocator: std.mem.Allocator, left_dir: []const u8, plan: *const sql.Plan) !void {

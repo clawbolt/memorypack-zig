@@ -27,6 +27,13 @@ pub const ChunkMeta = struct {
     pub const memorypack_version_tolerant = true;
     id: u32,
     rows: u32,
+    zone_maps: []const ZoneMap = &.{},
+};
+pub const ZoneMap = struct {
+    pub const memorypack_version_tolerant = true;
+    min: memorypack.Str,
+    max: memorypack.Str,
+    null_count: u32,
 };
 
 pub const Manifest = struct {
@@ -131,9 +138,23 @@ pub const Table = struct {
             .name = .{ .bytes = try allocator.dupe(u8, column.name.bytes) },
             .kind = column.kind,
         });
-        for (manifest.chunks) |chunk| try table.chunks.append(allocator, chunk);
+        for (manifest.chunks) |chunk| {
+            var zones: std.ArrayList(ZoneMap) = .empty;
+            errdefer zones.deinit(allocator);
+            for (chunk.zone_maps) |zone| try zones.append(allocator, .{
+                .min = .{ .bytes = try allocator.dupe(u8, zone.min.bytes) },
+                .max = .{ .bytes = try allocator.dupe(u8, zone.max.bytes) },
+                .null_count = zone.null_count,
+            });
+            try table.chunks.append(allocator, .{ .id = chunk.id, .rows = chunk.rows, .zone_maps = try zones.toOwnedSlice(allocator) });
+        }
         for (manifest.schema) |column| allocator.free(column.name.bytes);
+        for (manifest.chunks) |chunk| for (chunk.zone_maps) |zone| {
+            allocator.free(zone.min.bytes);
+            allocator.free(zone.max.bytes);
+        };
         allocator.free(manifest.schema);
+        for (manifest.chunks) |chunk| allocator.free(chunk.zone_maps);
         allocator.free(manifest.chunks);
         return table;
     }
@@ -147,6 +168,13 @@ pub const Table = struct {
         self.closed = true;
         for (self.schema.items) |*column| self.allocator.free(column.name.bytes);
         self.schema.deinit(self.allocator);
+        for (self.chunks.items) |chunk| {
+            for (chunk.zone_maps) |zone| {
+                self.allocator.free(zone.min.bytes);
+                self.allocator.free(zone.max.bytes);
+            }
+            self.allocator.free(chunk.zone_maps);
+        }
         self.chunks.deinit(self.allocator);
         self.allocator.free(self.dir);
         self.allocator.free(self.manifest_path);
@@ -158,6 +186,13 @@ pub const Table = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.TableClosed;
         return self.schema.items;
+    }
+
+    pub fn getChunkMeta(self: *Table) ![]const ChunkMeta {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.TableClosed;
+        return self.chunks.items;
     }
 
     pub fn appendChunk(self: *Table, columns: []const Column) !u32 {
@@ -225,7 +260,9 @@ pub const Table = struct {
         defer file.close(self.io);
         try file.sync(self.io);
         try std.Io.Dir.rename(std.Io.Dir.cwd(), temp, std.Io.Dir.cwd(), path, self.io);
-        try self.chunks.append(self.allocator, .{ .id = id, .rows = @intCast(rows) });
+        const zone_maps = try buildZoneMaps(self.allocator, columns, validity.items);
+        errdefer freeZoneMaps(self.allocator, zone_maps);
+        try self.chunks.append(self.allocator, .{ .id = id, .rows = @intCast(rows), .zone_maps = zone_maps });
         for (validity.items) |bitmap| self.allocator.free(bitmap);
         for (dictionaries.items) |dictionary| {
             for (dictionary.values) |value| self.allocator.free(value.bytes);
@@ -300,6 +337,72 @@ pub const Table = struct {
         try std.Io.Dir.rename(std.Io.Dir.cwd(), temp, std.Io.Dir.cwd(), self.manifest_path, self.io);
     }
 };
+
+fn freeZoneMaps(allocator: std.mem.Allocator, zones: []const ZoneMap) void {
+    for (zones) |zone| {
+        allocator.free(zone.min.bytes);
+        allocator.free(zone.max.bytes);
+    }
+    allocator.free(zones);
+}
+
+fn buildZoneMaps(allocator: std.mem.Allocator, columns: []const Column, validity: []const []const u8) ![]const ZoneMap {
+    const zones = try allocator.alloc(ZoneMap, columns.len);
+    for (zones) |*zone| zone.* = .{ .min = .{ .bytes = &.{} }, .max = .{ .bytes = &.{} }, .null_count = 0 };
+    errdefer {
+        for (zones) |zone| {
+            if (zone.min.bytes.len > 0) allocator.free(zone.min.bytes);
+            if (zone.max.bytes.len > 0) allocator.free(zone.max.bytes);
+        }
+        allocator.free(zones);
+    }
+    for (columns, 0..) |column, index| {
+        var null_count: u32 = 0;
+        for (0..columnLength(column)) |row| {
+            if ((validity[index][row / 8] & (@as(u8, 1) << @intCast(row % 8))) == 0) null_count += 1;
+        }
+        var min: []u8 = &.{};
+        var max: []u8 = &.{};
+        switch (column) {
+            .i64 => |values| {
+                var lo = values[0];
+                var hi = values[0];
+                for (values, 0..) |value, row| if ((validity[index][row / 8] & (@as(u8, 1) << @intCast(row % 8))) != 0) {
+                    lo = @min(lo, value);
+                    hi = @max(hi, value);
+                };
+                min = try std.fmt.allocPrint(allocator, "{d}", .{lo});
+                max = try std.fmt.allocPrint(allocator, "{d}", .{hi});
+            },
+            .f64 => |values| {
+                var lo = values[0];
+                var hi = values[0];
+                for (values, 0..) |value, row| if ((validity[index][row / 8] & (@as(u8, 1) << @intCast(row % 8))) != 0) {
+                    lo = @min(lo, value);
+                    hi = @max(hi, value);
+                };
+                min = try std.fmt.allocPrint(allocator, "{d}", .{lo});
+                max = try std.fmt.allocPrint(allocator, "{d}", .{hi});
+            },
+            .bool => |values| {
+                min = try allocator.dupe(u8, if (values.len == 0 or !values[0]) "0" else "1");
+                max = try allocator.dupe(u8, if (values.len == 0 or values[values.len - 1]) "1" else "0");
+            },
+            .string => |values| {
+                var lo = values[0].bytes;
+                var hi = values[0].bytes;
+                for (values, 0..) |value, row| if ((validity[index][row / 8] & (@as(u8, 1) << @intCast(row % 8))) != 0) {
+                    if (std.mem.order(u8, value.bytes, lo) == .lt) lo = value.bytes;
+                    if (std.mem.order(u8, value.bytes, hi) == .gt) hi = value.bytes;
+                };
+                min = try allocator.dupe(u8, lo);
+                max = try allocator.dupe(u8, hi);
+            },
+        }
+        zones[index] = .{ .min = .{ .bytes = min }, .max = .{ .bytes = max }, .null_count = null_count };
+    }
+    return zones;
+}
 
 fn validateSchema(schema: []const ColumnSchema) !void {
     if (schema.len == 0) return error.InvalidSchema;
