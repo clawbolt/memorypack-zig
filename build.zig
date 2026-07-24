@@ -162,4 +162,36 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(mq_tests).step);
+
+    const audit_module = b.addModule("audit", .{
+        .root_source_file = b.path("examples/audit/audit.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "memorypack", .module = module }},
+    });
+    const audit_cli = b.addExecutable(.{
+        .name = "audit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/audit/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "memorypack", .module = module },
+                .{ .name = "audit", .module = audit_module },
+            },
+        }),
+    });
+    const run_audit = b.addRunArtifact(audit_cli);
+    if (b.args) |args| run_audit.addArgs(args);
+    b.step("audit", "Run the tamper-evident audit log").dependOn(&run_audit.step);
+
+    const audit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/audit/audit.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "memorypack", .module = module }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(audit_tests).step);
 }

@@ -401,3 +401,8 @@ For the enterprise messaging showcase, see
 [`examples/mq/README.md`](examples/mq/README.md). It provides durable
 MemoryPack topic logs, CRC-checked recovery, consumer-group offsets,
 at-least-once delivery, and a framed TCP broker protocol.
+
+For the compliance/security showcase, see
+[`examples/audit/README.md`](examples/audit/README.md). It provides a
+tamper-evident SHA-256 hash chain over durable MemoryPack audit entries,
+verification, pagination, and a framed TCP service.
