@@ -27,6 +27,7 @@ pub const Predicate = struct {
     column: memorypack.Str,
     op: exec.CompareOp,
     literal: memorypack.Str,
+    null_check: ?bool = null,
 };
 pub const Plan = struct {
     allocator: std.mem.Allocator,
@@ -75,6 +76,20 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) ParseError!Plan {
             while (true) {
                 const column = tokens.next() orelse return error.InvalidPredicate;
                 const operator = tokens.next() orelse return error.InvalidOperator;
+                if (std.ascii.eqlIgnoreCase(operator, "IS")) {
+                    const maybe_not = tokens.next() orelse return error.InvalidLiteral;
+                    var is_null = true;
+                    var consumed = maybe_not;
+                    if (std.ascii.eqlIgnoreCase(maybe_not, "NOT")) {
+                        is_null = false;
+                        consumed = tokens.next() orelse return error.InvalidLiteral;
+                    }
+                    if (!std.ascii.eqlIgnoreCase(consumed, "NULL")) return error.InvalidLiteral;
+                    try predicates.append(allocator, .{ .column = .{ .bytes = try allocator.dupe(u8, stripComma(column)) }, .op = .eq, .literal = .{ .bytes = try allocator.dupe(u8, "") }, .null_check = is_null });
+                    const next = tokens.next() orelse break;
+                    if (!std.ascii.eqlIgnoreCase(next, "AND")) return error.TrailingTokens;
+                    continue;
+                }
                 const literal = tokens.next() orelse return error.InvalidLiteral;
                 const op = try parseOperator(operator);
                 const column_copy = try allocator.dupe(u8, stripComma(column));
@@ -130,7 +145,7 @@ pub fn bind(allocator: std.mem.Allocator, plan: *const Plan, schema: []const sto
     errdefer freeBoundPredicates(allocator, predicates.items);
     for (plan.predicates) |predicate| {
         const column = findColumn(schema, predicate.column.bytes) orelse return error.ColumnNotFound;
-        try predicates.append(allocator, .{ .column = column, .op = predicate.op, .value = try parseScalar(allocator, schema[column].kind, predicate.literal.bytes) });
+        try predicates.append(allocator, .{ .column = column, .op = predicate.op, .value = if (predicate.null_check != null) .{ .null = {} } else try parseScalar(allocator, schema[column].kind, predicate.literal.bytes), .null_check = predicate.null_check });
     }
     const group_by = if (plan.group_by) |group| findColumn(schema, group.bytes) orelse return error.ColumnNotFound else null;
     return .{

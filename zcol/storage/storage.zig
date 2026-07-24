@@ -46,7 +46,14 @@ pub const Column = union(enum) {
 
 pub const Chunk = struct {
     pub const memorypack_version_tolerant = true;
-    columns: []const Column,
+    columns: []Column,
+    validity: [][]const u8 = &.{},
+    dictionaries: []Dictionary = &.{},
+    codes: [][]const u32 = &.{},
+};
+pub const Dictionary = struct {
+    pub const memorypack_version_tolerant = true;
+    values: []const memorypack.Str,
 };
 
 pub const Stats = struct {
@@ -154,13 +161,59 @@ pub const Table = struct {
     }
 
     pub fn appendChunk(self: *Table, columns: []const Column) !u32 {
+        return self.appendChunkWithValidity(columns, &.{});
+    }
+
+    pub fn appendChunkWithValidity(self: *Table, columns: []const Column, supplied_validity: []const []const u8) !u32 {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.TableClosed;
         const rows = try validateColumns(self.schema.items, columns);
         if (rows == 0 or rows > self.chunk_rows) return error.InvalidChunk;
         const id = self.next_chunk;
-        const chunk = Chunk{ .columns = columns };
+        var validity: std.ArrayList([]const u8) = .empty;
+        defer validity.deinit(self.allocator);
+        var dictionaries: std.ArrayList(Dictionary) = .empty;
+        defer dictionaries.deinit(self.allocator);
+        var codes: std.ArrayList([]const u32) = .empty;
+        defer codes.deinit(self.allocator);
+        for (columns, 0..) |column, index| {
+            const count = columnLength(column);
+            if (supplied_validity.len == 0) {
+                const bitmap = try self.allocator.alloc(u8, (count + 7) / 8);
+                @memset(bitmap, 0xff);
+                if (count % 8 != 0) bitmap[bitmap.len - 1] &= @as(u8, @intCast((@as(u16, 1) << @intCast(count % 8)) - 1));
+                try validity.append(self.allocator, bitmap);
+            } else {
+                if (supplied_validity.len != columns.len or supplied_validity[index].len != (count + 7) / 8) return error.InvalidChunk;
+                try validity.append(self.allocator, try self.allocator.dupe(u8, supplied_validity[index]));
+            }
+            if (self.schema.items[index].kind == .string) {
+                var values: std.ArrayList(memorypack.Str) = .empty;
+                var code_values = try self.allocator.alloc(u32, count);
+                defer self.allocator.free(code_values);
+                const strings = column.string;
+                for (strings, 0..) |value, row| {
+                    var found: ?u32 = null;
+                    for (values.items, 0..) |existing, dictionary_index| if (std.mem.eql(u8, existing.bytes, value.bytes)) {
+                        found = @intCast(dictionary_index);
+                        break;
+                    };
+                    if (found) |code| code_values[row] = code else {
+                        try values.append(self.allocator, .{ .bytes = try self.allocator.dupe(u8, value.bytes) });
+                        code_values[row] = @intCast(values.items.len - 1);
+                    }
+                }
+                const dictionary = try values.toOwnedSlice(self.allocator);
+                try dictionaries.append(self.allocator, .{ .values = dictionary });
+                try codes.append(self.allocator, try self.allocator.dupe(u32, code_values));
+                values = .empty;
+            } else {
+                try dictionaries.append(self.allocator, .{ .values = try self.allocator.alloc(memorypack.Str, 0) });
+                try codes.append(self.allocator, try self.allocator.alloc(u32, 0));
+            }
+        }
+        const chunk = Chunk{ .columns = @constCast(columns), .validity = validity.items, .dictionaries = dictionaries.items, .codes = codes.items };
         const bytes = try memorypack.encode(self.allocator, chunk);
         defer self.allocator.free(bytes);
         const path = try self.chunkPath(id);
@@ -173,6 +226,12 @@ pub const Table = struct {
         try file.sync(self.io);
         try std.Io.Dir.rename(std.Io.Dir.cwd(), temp, std.Io.Dir.cwd(), path, self.io);
         try self.chunks.append(self.allocator, .{ .id = id, .rows = @intCast(rows) });
+        for (validity.items) |bitmap| self.allocator.free(bitmap);
+        for (dictionaries.items) |dictionary| {
+            for (dictionary.values) |value| self.allocator.free(value.bytes);
+            self.allocator.free(dictionary.values);
+        }
+        for (codes.items) |column_codes| if (column_codes.len > 0) self.allocator.free(column_codes);
         self.next_chunk += 1;
         try self.writeManifest();
         return id;
@@ -186,7 +245,20 @@ pub const Table = struct {
         defer self.allocator.free(path);
         const bytes = try std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(256 * 1024 * 1024));
         defer self.allocator.free(bytes);
-        return memorypack.decode(Chunk, self.allocator, bytes);
+        var chunk = try memorypack.decode(Chunk, self.allocator, bytes);
+        if (chunk.dictionaries.len == chunk.columns.len and chunk.codes.len == chunk.columns.len) {
+            for (chunk.columns, 0..) |column, index| if (column == .string and chunk.codes[index].len > 0) {
+                const decoded = try self.allocator.alloc(memorypack.Str, chunk.codes[index].len);
+                for (chunk.codes[index], 0..) |code, row| {
+                    if (code >= chunk.dictionaries[index].values.len) return error.InvalidChunk;
+                    decoded[row] = .{ .bytes = try self.allocator.dupe(u8, chunk.dictionaries[index].values[code].bytes) };
+                }
+                for (chunk.columns[index].string) |value| self.allocator.free(value.bytes);
+                self.allocator.free(chunk.columns[index].string);
+                chunk.columns[index] = .{ .string = decoded };
+            };
+        }
+        return chunk;
     }
 
     pub fn stats(self: *Table) !Stats {
@@ -264,7 +336,25 @@ pub fn freeChunk(allocator: std.mem.Allocator, chunk: *Chunk) void {
             allocator.free(values);
         },
     };
+    for (chunk.validity) |bitmap| if (bitmap.len > 0) allocator.free(bitmap);
+    for (chunk.dictionaries) |dictionary| {
+        for (dictionary.values) |value| allocator.free(value.bytes);
+        allocator.free(dictionary.values);
+    }
+    for (chunk.codes) |column_codes| allocator.free(column_codes);
+    if (chunk.validity.len > 0) allocator.free(chunk.validity);
+    if (chunk.dictionaries.len > 0) allocator.free(chunk.dictionaries);
+    if (chunk.codes.len > 0) allocator.free(chunk.codes);
     allocator.free(chunk.columns);
+}
+
+fn columnLength(column: Column) usize {
+    return switch (column) {
+        .i64 => |values| values.len,
+        .f64 => |values| values.len,
+        .bool => |values| values.len,
+        .string => |values| values.len,
+    };
 }
 
 test "column table persists manifest and typed chunks" {
