@@ -27,10 +27,11 @@ zig build zcol -- <command> ...
 A table directory contains `manifest.bin` and `chunk-N.bin` files. The
 MemoryPack manifest contains version, chunk size, schema (`name` plus
 `i64`/`f64`/`bool`/`string` kind), and a chunk index with row counts. Each
-chunk is a MemoryPack object containing one typed vector for every schema
-column. Primitive values use packed arrays. Strings are direct UTF-8
-String columns are always dictionary encoded per chunk: unique UTF-8 values are
-stored once and rows store `u32` dictionary codes.
+chunk file contains independently framed `(chunk, column)` segments. The
+manifest records each segment's offset and length, so readers seek to and
+decode only requested columns. Primitive values use packed arrays. String
+columns are always dictionary encoded per chunk: unique UTF-8 values are stored
+once and rows store `u32` dictionary codes.
 
 Every column chunk carries a packed validity bitmap. CSV empty fields and the
 literal `NULL` are null. Ordinary comparisons never match null; `IS NULL` and
@@ -57,8 +58,10 @@ and ascending or descending order.
 
 Every chunk persists zone maps (textual min/max plus null count) in its
 version-tolerant manifest metadata. Selective numeric predicates skip
-impossible chunks and report scan/skip counts. Projection gathering is delayed
-until after filtering and reports the bytes of non-projected values avoided.
+impossible chunks and report scan/skip counts. Predicate columns are decoded
+first; projection, aggregate, and grouping columns are decoded only for chunks
+that survive zone-map and row selection. Results report actual segment bytes
+read and decoded versus the full-decode baseline.
 Large ungrouped `SUM(f64)` plans can use deterministic threaded reduction;
 small inputs remain serial.
 
@@ -78,7 +81,7 @@ Window expressions use a running frame from the start of each partition:
 
 ```text
 ROW_NUMBER() OVER (PARTITION BY team ORDER BY amount)
-SUM(amount) OVER (PARTITION BY team ORDER BY amount)
+SUM(amount) OVER (PARTITION BY team ORDER BY amount DESC)
 ```
 
 `RANK` includes gaps after ties and `DENSE_RANK` does not. Null join keys

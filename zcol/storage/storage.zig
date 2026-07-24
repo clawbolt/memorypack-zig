@@ -8,6 +8,8 @@ pub const Error = error{
     TableClosed,
     ManifestMissing,
     ColumnNotFound,
+    LegacyChunkFormat,
+    SegmentCorrupt,
 };
 
 pub const ColumnType = enum(u8) {
@@ -28,6 +30,12 @@ pub const ChunkMeta = struct {
     id: u32,
     rows: u32,
     zone_maps: []const ZoneMap = &.{},
+    segments: []const Segment = &.{},
+};
+pub const Segment = struct {
+    pub const memorypack_version_tolerant = true;
+    offset: u64,
+    length: u64,
 };
 pub const ZoneMap = struct {
     pub const memorypack_version_tolerant = true;
@@ -58,6 +66,12 @@ pub const Chunk = struct {
     dictionaries: []Dictionary = &.{},
     codes: [][]const u32 = &.{},
 };
+pub const ColumnPayload = struct {
+    column: Column,
+    validity: []const u8,
+    dictionary: Dictionary,
+    codes: []const u32,
+};
 pub const Dictionary = struct {
     pub const memorypack_version_tolerant = true;
     values: []const memorypack.Str,
@@ -68,6 +82,10 @@ pub const Stats = struct {
     chunks: usize,
     rows: usize,
     bytes: u64,
+};
+pub const ReadStats = struct {
+    bytes_read: u64 = 0,
+    segments_decoded: usize = 0,
 };
 
 pub const Table = struct {
@@ -81,6 +99,7 @@ pub const Table = struct {
     next_chunk: u32 = 0,
     closed: bool = false,
     mutex: std.Io.Mutex = .init,
+    read_stats: ReadStats = .{},
 
     pub fn create(
         io: std.Io,
@@ -121,6 +140,7 @@ pub const Table = struct {
         defer allocator.free(bytes);
         var manifest = try memorypack.decode(Manifest, allocator, bytes);
         errdefer memorypack.deinit(Manifest, allocator, &manifest);
+        if (manifest.version < 2) return error.LegacyChunkFormat;
         try validateSchema(manifest.schema);
         if (manifest.chunk_rows == 0) return error.InvalidConfig;
         var table = Table{
@@ -146,7 +166,9 @@ pub const Table = struct {
                 .max = .{ .bytes = try allocator.dupe(u8, zone.max.bytes) },
                 .null_count = zone.null_count,
             });
-            try table.chunks.append(allocator, .{ .id = chunk.id, .rows = chunk.rows, .zone_maps = try zones.toOwnedSlice(allocator) });
+            const segments = try allocator.alloc(Segment, chunk.segments.len);
+            @memcpy(segments, chunk.segments);
+            try table.chunks.append(allocator, .{ .id = chunk.id, .rows = chunk.rows, .zone_maps = try zones.toOwnedSlice(allocator), .segments = segments });
         }
         for (manifest.schema) |column| allocator.free(column.name.bytes);
         for (manifest.chunks) |chunk| for (chunk.zone_maps) |zone| {
@@ -155,6 +177,7 @@ pub const Table = struct {
         };
         allocator.free(manifest.schema);
         for (manifest.chunks) |chunk| allocator.free(chunk.zone_maps);
+        for (manifest.chunks) |chunk| allocator.free(chunk.segments);
         allocator.free(manifest.chunks);
         return table;
     }
@@ -174,6 +197,7 @@ pub const Table = struct {
                 self.allocator.free(zone.max.bytes);
             }
             self.allocator.free(chunk.zone_maps);
+            self.allocator.free(chunk.segments);
         }
         self.chunks.deinit(self.allocator);
         self.allocator.free(self.dir);
@@ -193,6 +217,20 @@ pub const Table = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.TableClosed;
         return self.chunks.items;
+    }
+
+    pub fn resetReadStats(self: *Table) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.TableClosed;
+        self.read_stats = .{};
+    }
+
+    pub fn getReadStats(self: *Table) !ReadStats {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.TableClosed;
+        return self.read_stats;
     }
 
     pub fn appendChunk(self: *Table, columns: []const Column) !u32 {
@@ -248,21 +286,41 @@ pub const Table = struct {
                 try codes.append(self.allocator, try self.allocator.alloc(u32, 0));
             }
         }
-        const chunk = Chunk{ .columns = @constCast(columns), .validity = validity.items, .dictionaries = dictionaries.items, .codes = codes.items };
-        const bytes = try memorypack.encode(self.allocator, chunk);
-        defer self.allocator.free(bytes);
         const path = try self.chunkPath(id);
         defer self.allocator.free(path);
         const temp = try std.fmt.allocPrint(self.allocator, "{s}.tmp", .{path});
         defer self.allocator.free(temp);
-        try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = temp, .data = bytes });
-        var file = try std.Io.Dir.cwd().openFile(self.io, temp, .{ .mode = .read_only });
+        var file = try std.Io.Dir.cwd().createFile(self.io, temp, .{ .truncate = true });
         defer file.close(self.io);
+        var buffer: [4096]u8 = undefined;
+        var writer = file.writerStreaming(self.io, &buffer);
+        var segments = try self.allocator.alloc(Segment, columns.len);
+        errdefer self.allocator.free(segments);
+        var offset: u64 = 0;
+        for (columns, 0..) |column, index| {
+            const payload = ColumnPayload{
+                .column = column,
+                .validity = validity.items[index],
+                .dictionary = dictionaries.items[index],
+                .codes = codes.items[index],
+            };
+            const bytes = try memorypack.encode(self.allocator, payload);
+            defer self.allocator.free(bytes);
+            var header: [12]u8 = undefined;
+            std.mem.writeInt(u64, header[0..8], @intCast(bytes.len), .little);
+            std.mem.writeInt(u32, header[8..12], std.hash.Crc32.hash(bytes), .little);
+            try writer.interface.writeAll(&header);
+            try writer.interface.writeAll(bytes);
+            segments[index] = .{ .offset = offset, .length = @intCast(header.len + bytes.len) };
+            offset += header.len + bytes.len;
+        }
+        try writer.interface.flush();
         try file.sync(self.io);
         try std.Io.Dir.rename(std.Io.Dir.cwd(), temp, std.Io.Dir.cwd(), path, self.io);
         const zone_maps = try buildZoneMaps(self.allocator, columns, validity.items);
         errdefer freeZoneMaps(self.allocator, zone_maps);
-        try self.chunks.append(self.allocator, .{ .id = id, .rows = @intCast(rows), .zone_maps = zone_maps });
+        try self.chunks.append(self.allocator, .{ .id = id, .rows = @intCast(rows), .zone_maps = zone_maps, .segments = segments });
+        segments = &.{};
         for (validity.items) |bitmap| self.allocator.free(bitmap);
         for (dictionaries.items) |dictionary| {
             for (dictionary.values) |value| self.allocator.free(value.bytes);
@@ -275,27 +333,81 @@ pub const Table = struct {
     }
 
     pub fn readChunk(self: *Table, id: u32) !Chunk {
+        const requested = try self.allocator.alloc(usize, self.schema.items.len);
+        defer self.allocator.free(requested);
+        for (requested, 0..) |*column, index| column.* = index;
+        return self.readColumns(id, requested);
+    }
+
+    pub fn readColumns(self: *Table, id: u32, requested: []const usize) !Chunk {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.TableClosed;
+        const meta = try self.metaFor(id);
+        if (meta.segments.len != self.schema.items.len) return error.LegacyChunkFormat;
+        var columns = try self.allocator.alloc(Column, self.schema.items.len);
+        errdefer self.allocator.free(columns);
+        var validity = try self.allocator.alloc([]const u8, self.schema.items.len);
+        errdefer self.allocator.free(validity);
+        var dictionaries = try self.allocator.alloc(Dictionary, self.schema.items.len);
+        errdefer self.allocator.free(dictionaries);
+        var codes = try self.allocator.alloc([]const u32, self.schema.items.len);
+        errdefer self.allocator.free(codes);
+        for (self.schema.items, 0..) |schema, index| {
+            columns[index] = emptyColumn(schema.kind);
+            const bitmap = try self.allocator.alloc(u8, (meta.rows + 7) / 8);
+            @memset(bitmap, 0xff);
+            validity[index] = bitmap;
+            dictionaries[index] = .{ .values = &.{} };
+            codes[index] = &.{};
+        }
+        for (requested) |index| {
+            if (index >= self.schema.items.len) return error.ColumnNotFound;
+            const schema = self.schema.items[index];
+            self.allocator.free(validity[index]);
+            const payload = try self.readColumnPayloadUnlocked(meta.segments[index], id);
+            columns[index] = try materializeColumn(self.allocator, payload, schema.kind);
+            validity[index] = payload.validity;
+            dictionaries[index] = payload.dictionary;
+            codes[index] = payload.codes;
+        }
+        const chunk = Chunk{ .columns = columns, .validity = validity, .dictionaries = dictionaries, .codes = codes };
+        return chunk;
+    }
+
+    pub fn readColumnPayload(self: *Table, id: u32, column: usize) !ColumnPayload {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.TableClosed;
+        if (column >= self.schema.items.len) return error.ColumnNotFound;
+        const meta = try self.metaFor(id);
+        if (meta.segments.len != self.schema.items.len) return error.LegacyChunkFormat;
+        return self.readColumnPayloadUnlocked(meta.segments[column], id);
+    }
+
+    fn readColumnPayloadUnlocked(self: *Table, segment: Segment, id: u32) !ColumnPayload {
         const path = try self.chunkPath(id);
         defer self.allocator.free(path);
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(256 * 1024 * 1024));
-        defer self.allocator.free(bytes);
-        var chunk = try memorypack.decode(Chunk, self.allocator, bytes);
-        if (chunk.dictionaries.len == chunk.columns.len and chunk.codes.len == chunk.columns.len) {
-            for (chunk.columns, 0..) |column, index| if (column == .string and chunk.codes[index].len > 0) {
-                const decoded = try self.allocator.alloc(memorypack.Str, chunk.codes[index].len);
-                for (chunk.codes[index], 0..) |code, row| {
-                    if (code >= chunk.dictionaries[index].values.len) return error.InvalidChunk;
-                    decoded[row] = .{ .bytes = try self.allocator.dupe(u8, chunk.dictionaries[index].values[code].bytes) };
-                }
-                for (chunk.columns[index].string) |value| self.allocator.free(value.bytes);
-                self.allocator.free(chunk.columns[index].string);
-                chunk.columns[index] = .{ .string = decoded };
-            };
-        }
-        return chunk;
+        var file = try std.Io.Dir.cwd().openFile(self.io, path, .{ .mode = .read_only });
+        defer file.close(self.io);
+        var header: [12]u8 = undefined;
+        _ = try file.readPositionalAll(self.io, &header, segment.offset);
+        const length = std.mem.readInt(u64, header[0..8], .little);
+        if (length + 12 != segment.length or length > 256 * 1024 * 1024) return error.SegmentCorrupt;
+        const bytes = try self.allocator.alloc(u8, @intCast(length));
+        errdefer self.allocator.free(bytes);
+        _ = try file.readPositionalAll(self.io, bytes, segment.offset + 12);
+        if (std.mem.readInt(u32, header[8..12], .little) != std.hash.Crc32.hash(bytes)) return error.SegmentCorrupt;
+        const payload = try memorypack.decode(ColumnPayload, self.allocator, bytes);
+        self.allocator.free(bytes);
+        self.read_stats.bytes_read += segment.length;
+        self.read_stats.segments_decoded += 1;
+        return payload;
+    }
+
+    fn metaFor(self: *Table, id: u32) !ChunkMeta {
+        for (self.chunks.items) |meta| if (meta.id == id) return meta;
+        return error.InvalidChunk;
     }
 
     pub fn stats(self: *Table) !Stats {
@@ -321,7 +433,7 @@ pub const Table = struct {
 
     fn writeManifest(self: *Table) !void {
         const manifest = Manifest{
-            .version = 1,
+            .version = 2,
             .chunk_rows = self.chunk_rows,
             .schema = self.schema.items,
             .chunks = self.chunks.items,
@@ -460,6 +572,28 @@ fn columnLength(column: Column) usize {
     };
 }
 
+fn emptyColumn(kind: ColumnType) Column {
+    return switch (kind) {
+        .i64 => .{ .i64 = &.{} },
+        .f64 => .{ .f64 = &.{} },
+        .bool => .{ .bool = &.{} },
+        .string => .{ .string = &.{} },
+    };
+}
+
+fn materializeColumn(allocator: std.mem.Allocator, payload: ColumnPayload, kind: ColumnType) !Column {
+    if (kind != .string or payload.codes.len == 0) return payload.column;
+    const decoded = try allocator.alloc(memorypack.Str, payload.codes.len);
+    errdefer allocator.free(decoded);
+    for (payload.codes, 0..) |code, row| {
+        if (code >= payload.dictionary.values.len) return error.InvalidChunk;
+        decoded[row] = .{ .bytes = try allocator.dupe(u8, payload.dictionary.values[code].bytes) };
+    }
+    for (payload.column.string) |value| allocator.free(value.bytes);
+    allocator.free(payload.column.string);
+    return .{ .string = decoded };
+}
+
 test "column table persists manifest and typed chunks" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -489,4 +623,29 @@ test "column table persists manifest and typed chunks" {
     defer freeChunk(allocator, &chunk);
     try std.testing.expectEqual(@as(usize, 2), chunk.columns[0].i64.len);
     try std.testing.expectEqualStrings("b", chunk.columns[3].string[1].bytes);
+}
+
+test "segmented table reads one column without decoding siblings" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const dir = "zig-cache/zcol-storage-lazy";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const schema = [_]ColumnSchema{
+        .{ .name = .{ .bytes = "id" }, .kind = .i64 },
+        .{ .name = .{ .bytes = "payload" }, .kind = .string },
+        .{ .name = .{ .bytes = "value" }, .kind = .f64 },
+    };
+    var table = try Table.create(io, allocator, dir, &schema, 2);
+    defer table.deinit();
+    const payload = [_]memorypack.Str{ .{ .bytes = "x" }, .{ .bytes = "y" } };
+    _ = try table.appendChunk(&.{ .{ .i64 = &.{ 1, 2 } }, .{ .string = &payload }, .{ .f64 = &.{ 10, 20 } } });
+    try table.resetReadStats();
+    var chunk = try table.readColumns(0, &.{2});
+    defer freeChunk(allocator, &chunk);
+    const read_stats = try table.getReadStats();
+    try std.testing.expectEqual(@as(usize, 1), read_stats.segments_decoded);
+    try std.testing.expectEqual(@as(usize, 0), chunk.columns[0].i64.len);
+    try std.testing.expectEqual(@as(usize, 0), chunk.columns[1].string.len);
+    try std.testing.expectEqual(@as(f64, 20), chunk.columns[2].f64[1]);
 }

@@ -109,6 +109,7 @@ fn query(init: std.process.Init, allocator: std.mem.Allocator, args: *std.proces
     std.debug.print("rows={d}\n", .{result.rows.len});
     std.debug.print("chunks_scanned={d} chunks_skipped={d}\n", .{ result.chunks_scanned, result.chunks_skipped });
     std.debug.print("late_materialized_bytes_saved={d}\n", .{result.late_materialized_bytes_saved});
+    std.debug.print("bytes_read={d} segments_decoded={d} full_decode_bytes={d}\n", .{ result.bytes_read, result.segments_decoded, result.full_decode_bytes });
 }
 
 fn windowQuery(init: std.process.Init, allocator: std.mem.Allocator, dir: []const u8, text: []const u8) !void {

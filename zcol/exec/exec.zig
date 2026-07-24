@@ -131,6 +131,9 @@ pub const Result = struct {
     chunks_scanned: usize = 0,
     chunks_skipped: usize = 0,
     late_materialized_bytes_saved: usize = 0,
+    bytes_read: u64 = 0,
+    segments_decoded: usize = 0,
+    full_decode_bytes: u64 = 0,
 
     pub fn deinit(self: *Result) void {
         for (self.columns) |column| self.allocator.free(column.bytes);
@@ -392,6 +395,9 @@ pub fn execute(allocator: std.mem.Allocator, table: *storage.Table, query: Query
     var result = Result{ .allocator = allocator, .columns = try allocator.alloc(memorypack.Str, 0), .rows = try allocator.alloc(Row, 0) };
     errdefer result.deinit();
     result.columns = try buildResultColumns(allocator, schema, query);
+    try table.resetReadStats();
+    const needed = try queryColumns(allocator, schema, query);
+    defer allocator.free(needed);
     var deferred_bytes_per_row: usize = 0;
     for (schema, 0..) |column, index| {
         var projected = false;
@@ -433,9 +439,9 @@ pub fn execute(allocator: std.mem.Allocator, table: *storage.Table, query: Query
             continue;
         }
         result.chunks_scanned += 1;
-        var chunk = try table.readChunk(chunk_id);
+        var chunk = try table.readColumns(chunk_id, needed);
         defer storage.freeChunk(allocator, &chunk);
-        const row_count = columnLength(chunk.columns[0]);
+        const row_count = metadata[chunk_id].rows;
         const selected = try allocator.alloc(bool, row_count);
         defer allocator.free(selected);
         for (selected) |*value| value.* = true;
@@ -518,7 +524,32 @@ pub fn execute(allocator: std.mem.Allocator, table: *storage.Table, query: Query
         result.rows = result.rows[0..limit];
         result.storage_visible_len = limit;
     };
+    const read_stats = try table.getReadStats();
+    result.bytes_read = read_stats.bytes_read;
+    result.segments_decoded = read_stats.segments_decoded;
+    for (metadata) |meta| {
+        for (meta.segments) |segment| result.full_decode_bytes += segment.length;
+    }
     return result;
+}
+
+fn queryColumns(allocator: std.mem.Allocator, schema: []const storage.ColumnSchema, query: Query) ![]usize {
+    var columns: std.ArrayList(usize) = .empty;
+    errdefer columns.deinit(allocator);
+    const add = struct {
+        fn run(list: *std.ArrayList(usize), allocator_: std.mem.Allocator, index: usize) !void {
+            for (list.items) |existing| if (existing == index) return;
+            try list.append(allocator_, index);
+        }
+    }.run;
+    for (query.projection) |index| try add(&columns, allocator, index);
+    for (query.predicates) |predicate| try add(&columns, allocator, predicate.column);
+    for (query.aggregates) |aggregate| if (aggregate.column) |index| try add(&columns, allocator, index);
+    for (query.group_by_columns) |index| try add(&columns, allocator, index);
+    if (query.group_by) |index| try add(&columns, allocator, index);
+    if (columns.items.len == 0) try add(&columns, allocator, 0);
+    _ = schema;
+    return columns.toOwnedSlice(allocator);
 }
 
 fn columnStorageWidth(kind: storage.ColumnType) usize {
@@ -533,9 +564,11 @@ fn executeParallelSum(allocator: std.mem.Allocator, table: *storage.Table, query
     var values: std.ArrayList(f64) = .empty;
     defer values.deinit(allocator);
     const column = query.aggregates[0].column.?;
+    try table.resetReadStats();
     const stats = try table.stats();
     for (0..stats.chunks) |chunk_id| {
-        var chunk = try table.readChunk(@intCast(chunk_id));
+        var requested = [_]usize{column};
+        var chunk = try table.readColumns(@intCast(chunk_id), &requested);
         defer storage.freeChunk(allocator, &chunk);
         if (chunk.columns[column] != .f64) return error.InvalidChunk;
         for (chunk.columns[column].f64, 0..) |value, row| if (valid(chunk, column, row)) try values.append(allocator, value);
@@ -547,6 +580,12 @@ fn executeParallelSum(allocator: std.mem.Allocator, table: *storage.Table, query
     result.rows[0] = row;
     result.storage_rows = result.rows;
     result.storage_visible_len = 1;
+    const read_stats = try table.getReadStats();
+    result.bytes_read = read_stats.bytes_read;
+    result.segments_decoded = read_stats.segments_decoded;
+    for (try table.getChunkMeta()) |meta| {
+        for (meta.segments) |segment| result.full_decode_bytes += segment.length;
+    }
     return result.*;
 }
 
@@ -982,6 +1021,8 @@ test "zone maps skip impossible chunks without changing results" {
     try std.testing.expectEqual(@as(usize, 1), pushed.chunks_scanned);
     try std.testing.expectEqual(serial.rows.len, pushed.rows.len);
     try std.testing.expectEqual(@as(f64, 100), pushed.rows[0][0].f64);
+    try std.testing.expect(pushed.segments_decoded > 0);
+    try std.testing.expect(pushed.bytes_read < pushed.full_decode_bytes);
 }
 
 test "parallel numeric reduction matches serial reduction" {
