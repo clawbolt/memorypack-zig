@@ -279,7 +279,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(platform_audit_tests).step);
-    _ = platform_services;
     const platform_services_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("platform/services/services.zig"),
@@ -294,4 +293,48 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(platform_services_tests).step);
+
+    const platform_gateway = b.addModule("platform-gateway", .{
+        .root_source_file = b.path("platform/gateway/gateway.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "memorypack", .module = module },
+            .{ .name = "core", .module = platform_core },
+            .{ .name = "services", .module = platform_services },
+        },
+    });
+    const platform_cli = b.addExecutable(.{
+        .name = "platform",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("platform/cli/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "memorypack", .module = module },
+                .{ .name = "core", .module = platform_core },
+                .{ .name = "gateway", .module = platform_gateway },
+                .{ .name = "services", .module = platform_services },
+            },
+        }),
+    });
+    const run_platform = b.addRunArtifact(platform_cli);
+    if (b.args) |args| run_platform.addArgs(args);
+    b.step("platform", "Run the IoT telemetry platform").dependOn(&run_platform.step);
+    const platform_gateway_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("platform/gateway/gateway.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "memorypack", .module = module },
+                .{ .name = "core", .module = platform_core },
+                .{ .name = "services", .module = platform_services },
+            },
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(platform_gateway_tests).step);
+    const platform_e2e = b.addSystemCommand(&.{ "sh", "platform/e2e/run.sh" });
+    if (b.args) |args| platform_e2e.addArgs(args);
+    b.step("platform-e2e", "Run the IoT platform end-to-end flow").dependOn(&platform_e2e.step);
 }
