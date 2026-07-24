@@ -407,11 +407,11 @@ For the compliance/security showcase, see
 tamper-evident SHA-256 hash chain over durable MemoryPack audit entries,
 verification, pagination, and a framed TCP service.
 
-The flagship full-system showcase is [`iothub/README.md`](iothub/README.md):
+The flagship full-system showcase is [`examples/iothub/README.md`](examples/iothub/README.md):
 a modular pure-Zig IoT telemetry hub combining durable storage, an
 at-least-once event broker, alerting services, audit evidence, and an
 authenticated/rate-limited MemoryPack gateway.
 
-For the columnar analytics/OLAP showcase, see [`zcol/README.md`](zcol/README.md):
+For the columnar analytics/OLAP showcase, see [`examples/zcol/README.md`](examples/zcol/README.md):
 it provides MemoryPack-backed column chunks, vectorized execution, a small SQL
 subset, a CLI, and an honest columnar-versus-row benchmark.

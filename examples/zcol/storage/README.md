@@ -1,4 +1,4 @@
-# zcol/storage
+# examples/zcol/storage
 
 Durable MemoryPack-backed columnar tables. A manifest stores the schema and
 chunk index; every `(chunk, column)` is an independently framed segment with

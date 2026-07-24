@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/memorypack-iothub.XXXXXX")"
 PORT="${1:-39561}"
 PID=""

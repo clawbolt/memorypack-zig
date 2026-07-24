@@ -196,13 +196,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(audit_tests).step);
 
     const iothub_core = b.addModule("iothub-core", .{
-        .root_source_file = b.path("iothub/core/core.zig"),
+        .root_source_file = b.path("examples/iothub/core/core.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "memorypack", .module = module }},
     });
     const iothub_storage = b.addModule("iothub-storage", .{
-        .root_source_file = b.path("iothub/storage/storage.zig"),
+        .root_source_file = b.path("examples/iothub/storage/storage.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -212,7 +212,7 @@ pub fn build(b: *std.Build) void {
     });
     const iothub_core_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("iothub/core/core.zig"),
+            .root_source_file = b.path("examples/iothub/core/core.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "memorypack", .module = module }},
@@ -221,7 +221,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(iothub_core_tests).step);
     const iothub_storage_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("iothub/storage/storage.zig"),
+            .root_source_file = b.path("examples/iothub/storage/storage.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -233,7 +233,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(iothub_storage_tests).step);
 
     const iothub_broker = b.addModule("iothub-broker", .{
-        .root_source_file = b.path("iothub/broker/broker.zig"),
+        .root_source_file = b.path("examples/iothub/broker/broker.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -242,13 +242,13 @@ pub fn build(b: *std.Build) void {
         },
     });
     const iothub_audit = b.addModule("iothub-audit", .{
-        .root_source_file = b.path("iothub/audit/audit.zig"),
+        .root_source_file = b.path("examples/iothub/audit/audit.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "memorypack", .module = module }},
     });
     const iothub_services = b.addModule("iothub-services", .{
-        .root_source_file = b.path("iothub/services/services.zig"),
+        .root_source_file = b.path("examples/iothub/services/services.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -260,7 +260,7 @@ pub fn build(b: *std.Build) void {
     });
     const iothub_broker_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("iothub/broker/broker.zig"),
+            .root_source_file = b.path("examples/iothub/broker/broker.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -272,7 +272,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(iothub_broker_tests).step);
     const iothub_audit_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("iothub/audit/audit.zig"),
+            .root_source_file = b.path("examples/iothub/audit/audit.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "memorypack", .module = module }},
@@ -281,7 +281,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(iothub_audit_tests).step);
     const iothub_services_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("iothub/services/services.zig"),
+            .root_source_file = b.path("examples/iothub/services/services.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -295,7 +295,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(iothub_services_tests).step);
 
     const iothub_gateway = b.addModule("iothub-gateway", .{
-        .root_source_file = b.path("iothub/gateway/gateway.zig"),
+        .root_source_file = b.path("examples/iothub/gateway/gateway.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -307,7 +307,7 @@ pub fn build(b: *std.Build) void {
     const iothub_cli = b.addExecutable(.{
         .name = "iothub",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("iothub/cli/main.zig"),
+            .root_source_file = b.path("examples/iothub/cli/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -323,7 +323,7 @@ pub fn build(b: *std.Build) void {
     b.step("iothub", "Run the IoT Hub telemetry service").dependOn(&run_iothub.step);
     const iothub_gateway_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("iothub/gateway/gateway.zig"),
+            .root_source_file = b.path("examples/iothub/gateway/gateway.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -334,19 +334,19 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(iothub_gateway_tests).step);
-    const iothub_e2e = b.addSystemCommand(&.{ "sh", "iothub/e2e/run.sh" });
+    const iothub_e2e = b.addSystemCommand(&.{ "sh", "examples/iothub/e2e/run.sh" });
     if (b.args) |args| iothub_e2e.addArgs(args);
     b.step("iothub-e2e", "Run the IoT Hub end-to-end flow").dependOn(&iothub_e2e.step);
 
     const zcol_storage = b.addModule("zcol-storage", .{
-        .root_source_file = b.path("zcol/storage/storage.zig"),
+        .root_source_file = b.path("examples/zcol/storage/storage.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "memorypack", .module = module }},
     });
     const zcol_storage_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("zcol/storage/storage.zig"),
+            .root_source_file = b.path("examples/zcol/storage/storage.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "memorypack", .module = module }},
@@ -354,7 +354,7 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(zcol_storage_tests).step);
     const zcol_exec = b.addModule("zcol-exec", .{
-        .root_source_file = b.path("zcol/exec/exec.zig"),
+        .root_source_file = b.path("examples/zcol/exec/exec.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -364,7 +364,7 @@ pub fn build(b: *std.Build) void {
     });
     const zcol_exec_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("zcol/exec/exec.zig"),
+            .root_source_file = b.path("examples/zcol/exec/exec.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -375,7 +375,7 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(zcol_exec_tests).step);
     const zcol_sql = b.addModule("zcol-sql", .{
-        .root_source_file = b.path("zcol/sql/sql.zig"),
+        .root_source_file = b.path("examples/zcol/sql/sql.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -386,7 +386,7 @@ pub fn build(b: *std.Build) void {
     });
     const zcol_sql_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("zcol/sql/sql.zig"),
+            .root_source_file = b.path("examples/zcol/sql/sql.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -398,7 +398,7 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(zcol_sql_tests).step);
     const zcol_bench = b.addModule("zcol-bench", .{
-        .root_source_file = b.path("zcol/bench/bench.zig"),
+        .root_source_file = b.path("examples/zcol/bench/bench.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -408,7 +408,7 @@ pub fn build(b: *std.Build) void {
     });
     const zcol_bench_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("zcol/bench/bench.zig"),
+            .root_source_file = b.path("examples/zcol/bench/bench.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -421,7 +421,7 @@ pub fn build(b: *std.Build) void {
     const zcol_cli = b.addExecutable(.{
         .name = "zcol",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("zcol/cli/main.zig"),
+            .root_source_file = b.path("examples/zcol/cli/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -438,7 +438,7 @@ pub fn build(b: *std.Build) void {
     b.step("zcol", "Run the zcol columnar analytics engine").dependOn(&run_zcol.step);
     const zcol_cli_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("zcol/cli/main.zig"),
+            .root_source_file = b.path("examples/zcol/cli/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{

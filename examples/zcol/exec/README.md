@@ -1,4 +1,4 @@
-# zcol/exec
+# examples/zcol/exec
 
 Chunk-at-a-time vectorized execution. Predicates scan primitive slices,
 projections copy selected rows, and count/sum/min/max/avg plus composite hash

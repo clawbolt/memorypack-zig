@@ -1,4 +1,4 @@
-# zcol/bench
+# examples/zcol/bench
 
 Fairness-oriented benchmark using the same generated data and predicate for a
 column-vector loop and a row-oriented loop. It reports median latency, rows per

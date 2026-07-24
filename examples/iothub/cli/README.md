@@ -1,4 +1,4 @@
-# iothub/cli
+# examples/iothub/cli
 
 Unified operator CLI and gateway server entry point. It provides `serve`,
 device registration, telemetry ingestion, rule management, time-series query,

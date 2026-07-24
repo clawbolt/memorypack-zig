@@ -1,6 +1,6 @@
 # MemoryPack IoT Hub
 
-`iothub/` is the flagship pure-Zig system showcase in this repository. It
+`examples/iothub/` is the flagship pure-Zig system showcase in this repository. It
 combines a device registry, durable telemetry ingestion, event-driven
 threshold alerting, time-series queries, compliance auditing, and an
 authenticated TCP gateway. Every persisted record and wire request is
@@ -10,16 +10,16 @@ MemoryPack encoded.
 
 ```text
                  +----------------------+
- operator/client | iothub/cli         |
+ operator/client | examples/iothub/cli         |
                  +----------+-----------+
                             | MemoryPack TCP
                  +----------v-----------+
-                 | iothub/gateway     |
+                 | examples/iothub/gateway     |
                  | auth + rate limiting |
                  +----------+-----------+
                             |
                  +----------v-----------+
-                 | iothub/services    |
+                 | examples/iothub/services    |
                  | registry / ingest    |
                  | alerting / queries   |
                  +----+----------+------+
@@ -56,7 +56,7 @@ MemoryPack encoded.
 
 ```sh
 export PATH="$HOME/.dotnet:$HOME/.bin:$HOME/.local/bin:$HOME/.asdf/shims:$PATH"
-./iothub/e2e/run.sh
+./examples/iothub/e2e/run.sh
 ```
 
 Or start the service manually:

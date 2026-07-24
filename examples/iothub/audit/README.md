@@ -1,4 +1,4 @@
-# iothub/audit
+# examples/iothub/audit
 
 IotHub compliance log with a SHA-256 hash chain. Device provisioning, rule
 changes, and alert emissions are linked and verifiable. It is tamper-evident,

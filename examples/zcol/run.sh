@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 DATA=$(mktemp -d "${TMPDIR:-/tmp}/zcol-demo.XXXXXX")
 CSV="$DATA/sample.csv"
 trap 'rm -rf "$DATA"' EXIT

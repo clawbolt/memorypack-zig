@@ -1,4 +1,4 @@
-# iothub/e2e
+# examples/iothub/e2e
 
 The lifecycle script starts the real gateway, checks authentication and rate
 limiting, registers devices, configures an alert, ingests telemetry, queries

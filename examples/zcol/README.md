@@ -7,7 +7,7 @@ on typed slices a chunk at a time.
 ## Module map
 
 ```text
-zcol/
+examples/zcol/
 ├── storage/  MemoryPack manifest and typed column chunks
 ├── exec/     vectorized filtering, projection, aggregates, grouping
 ├── sql/      SQL-subset parser and schema binder
@@ -167,7 +167,7 @@ Commands are `create-table`, `load`, `query`, `describe`, `stats`, and
 `benchmark`. Run the complete fresh-directory demonstration with:
 
 ```sh
-./zcol/run.sh
+./examples/zcol/run.sh
 ```
 
 It creates a two-chunk table, loads nullable CSV, prints filtered, null,

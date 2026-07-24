@@ -1,4 +1,4 @@
-# zcol/sql
+# examples/zcol/sql
 
 Small typed SQL subset parser and binder. It supports `SELECT` projections and
 `COUNT`/`SUM`/`MIN`/`MAX`/`AVG`, numeric and string predicates joined by `AND`,
