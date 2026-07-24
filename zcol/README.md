@@ -65,6 +65,11 @@ read and decoded versus the full-decode baseline.
 Large ungrouped `SUM(f64)` plans can use deterministic threaded reduction;
 small inputs remain serial.
 
+For the selective four-column demo query, the reader reports
+`bytes_read=126`, `segments_decoded=2`, and `full_decode_bytes=423`; the
+zone-map-eliminated chunk contributes no segment reads. These are file-level
+metrics, not estimates from row gathering.
+
 ## SQL subset
 
 ```text

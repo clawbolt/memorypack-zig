@@ -398,6 +398,25 @@ pub fn execute(allocator: std.mem.Allocator, table: *storage.Table, query: Query
     try table.resetReadStats();
     const needed = try queryColumns(allocator, schema, query);
     defer allocator.free(needed);
+    var predicate_columns: std.ArrayList(usize) = .empty;
+    defer predicate_columns.deinit(allocator);
+    for (query.predicates) |predicate| {
+        var present = false;
+        for (predicate_columns.items) |existing| {
+            if (existing == predicate.column) present = true;
+        }
+        if (!present) try predicate_columns.append(allocator, predicate.column);
+    }
+    if (predicate_columns.items.len == 0) try predicate_columns.append(allocator, needed[0]);
+    var output_columns: std.ArrayList(usize) = .empty;
+    defer output_columns.deinit(allocator);
+    for (needed) |index| {
+        var predicate = false;
+        for (predicate_columns.items) |existing| {
+            if (existing == index) predicate = true;
+        }
+        if (!predicate) try output_columns.append(allocator, index);
+    }
     var deferred_bytes_per_row: usize = 0;
     for (schema, 0..) |column, index| {
         var projected = false;
@@ -439,7 +458,8 @@ pub fn execute(allocator: std.mem.Allocator, table: *storage.Table, query: Query
             continue;
         }
         result.chunks_scanned += 1;
-        var chunk = try table.readColumns(chunk_id, needed);
+        const initial_columns = if (query.predicates.len == 0) needed else predicate_columns.items;
+        var chunk = try table.readColumns(chunk_id, initial_columns);
         defer storage.freeChunk(allocator, &chunk);
         const row_count = metadata[chunk_id].rows;
         const selected = try allocator.alloc(bool, row_count);
@@ -452,6 +472,25 @@ pub fn execute(allocator: std.mem.Allocator, table: *storage.Table, query: Query
                         if (valid(chunk, predicate.column, row) == is_null) keep.* = false;
                     } else if (!valid(chunk, predicate.column, row) or !matches(chunk.columns[predicate.column], row, predicate)) keep.* = false;
                 }
+            }
+        }
+        var survivors: usize = 0;
+        for (selected) |keep| {
+            if (keep) survivors += 1;
+        }
+        if (query.predicates.len > 0 and survivors > 0 and output_columns.items.len > 0) {
+            var extra = try table.readColumns(chunk_id, output_columns.items);
+            defer storage.freeChunk(allocator, &extra);
+            for (output_columns.items) |index| {
+                chunk.columns[index] = extra.columns[index];
+                extra.columns[index] = emptyColumn(schema[index].kind);
+                allocator.free(chunk.validity[index]);
+                chunk.validity[index] = extra.validity[index];
+                extra.validity[index] = &.{};
+                chunk.dictionaries[index] = extra.dictionaries[index];
+                extra.dictionaries[index] = .{ .values = &.{} };
+                chunk.codes[index] = extra.codes[index];
+                extra.codes[index] = &.{};
             }
         }
         if (query.aggregates.len == 0 and query.group_by == null and query.group_by_columns.len == 0) {
@@ -676,6 +715,15 @@ fn columnLength(column: storage.Column) usize {
         .f64 => |values| values.len,
         .bool => |values| values.len,
         .string => |values| values.len,
+    };
+}
+
+fn emptyColumn(kind: storage.ColumnType) storage.Column {
+    return switch (kind) {
+        .i64 => .{ .i64 = &.{} },
+        .f64 => .{ .f64 = &.{} },
+        .bool => .{ .bool = &.{} },
+        .string => .{ .string = &.{} },
     };
 }
 
