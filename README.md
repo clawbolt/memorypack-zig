@@ -365,3 +365,16 @@ zig build test
 zig fmt --check src build.zig
 ./interop/run.sh
 ```
+
+## Example / real-world usage
+
+The file-based player-profile example demonstrates a complete Zig → C# →
+Zig workflow using real MemoryPack 1.21.3:
+
+```sh
+./examples/player-profile/run.sh
+```
+
+It covers objects, enums, a nullable application-defined value, arrays, and a tagged event
+union without relying on unordered collection ordering. See
+[`examples/player-profile/README.md`](examples/player-profile/README.md).

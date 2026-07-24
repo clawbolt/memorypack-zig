@@ -355,3 +355,16 @@ zig build test
 zig fmt --check src build.zig
 ./interop/run.sh
 ```
+
+## 示例 / 实际使用
+
+基于文件的 player-profile 示例展示了完整的 Zig → C# → Zig 流程，并使用
+真实的 MemoryPack 1.21.3：
+
+```sh
+./examples/player-profile/run.sh
+```
+
+示例覆盖对象、枚举、可空的应用自定义值、数组和带标签的事件 union，同时不依赖
+无序集合的枚举顺序。详见
+[`examples/player-profile/README.md`](examples/player-profile/README.md)。

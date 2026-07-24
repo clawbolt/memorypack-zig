@@ -45,4 +45,17 @@ pub fn build(b: *std.Build) void {
     });
     const run_bench = b.addRunArtifact(bench);
     b.step("bench", "Run MemoryPack and JSON benchmarks").dependOn(&run_bench.step);
+
+    const player_profile = b.addExecutable(.{
+        .name = "player-profile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/player-profile/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "memorypack", .module = module }},
+        }),
+    });
+    const run_player_profile = b.addRunArtifact(player_profile);
+    if (b.args) |args| run_player_profile.addArgs(args);
+    b.step("example", "Run the player profile interop example").dependOn(&run_player_profile.step);
 }
