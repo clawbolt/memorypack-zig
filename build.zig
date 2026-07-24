@@ -71,4 +71,17 @@ pub fn build(b: *std.Build) void {
     const run_rpc_client = b.addRunArtifact(rpc_client);
     if (b.args) |args| run_rpc_client.addArgs(args);
     b.step("rpc-client", "Run the Zig RPC socket client").dependOn(&run_rpc_client.step);
+
+    const task_cli = b.addExecutable(.{
+        .name = "task-cli",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/task-cli/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "memorypack", .module = module }},
+        }),
+    });
+    const run_task_cli = b.addRunArtifact(task_cli);
+    if (b.args) |args| run_task_cli.addArgs(args);
+    b.step("task-cli", "Run the pure-Zig MemoryPack task CLI").dependOn(&run_task_cli.step);
 }

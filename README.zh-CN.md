@@ -372,3 +372,7 @@ zig fmt --check src build.zig
 实时 TCP 示例见
 [`examples/rpc-socket/README.md`](examples/rpc-socket/README.md)。它运行真实的
 C# MemoryPack RPC 服务器和 Zig 客户端，并使用显式长度前缀分帧。
+
+纯 Zig 应用示例见
+[`examples/task-cli/README.md`](examples/task-cli/README.md)。这是一个持久化的
+命令行任务管理器，其存储使用 MemoryPack 编码。

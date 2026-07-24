@@ -383,3 +383,7 @@ For a live TCP example, see
 [`examples/rpc-socket/README.md`](examples/rpc-socket/README.md). It runs a
 real C# MemoryPack RPC server and a Zig client with explicit length-prefix
 framing.
+
+For a pure-Zig application, see
+[`examples/task-cli/README.md`](examples/task-cli/README.md). It is a
+persistent command-line task manager whose store is encoded with MemoryPack.
