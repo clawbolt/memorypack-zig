@@ -407,7 +407,7 @@ For the compliance/security showcase, see
 tamper-evident SHA-256 hash chain over durable MemoryPack audit entries,
 verification, pagination, and a framed TCP service.
 
-The flagship full-system showcase is [`platform/README.md`](platform/README.md):
-a modular pure-Zig IoT telemetry platform combining durable storage, an
+The flagship full-system showcase is [`iothub/README.md`](iothub/README.md):
+a modular pure-Zig IoT telemetry hub combining durable storage, an
 at-least-once event broker, alerting services, audit evidence, and an
 authenticated/rate-limited MemoryPack gateway.

@@ -41,7 +41,7 @@ pub const Alert = struct {
     timestamp: i64,
 };
 
-pub const Platform = struct {
+pub const IotHub = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     devices: storage.Store,
@@ -54,8 +54,8 @@ pub const Platform = struct {
     mutex: std.Io.Mutex = .init,
     closed: bool = false,
 
-    /// Opens all platform domain stores under one data directory.
-    pub fn open(io: std.Io, allocator: std.mem.Allocator, data_dir: []const u8) !Platform {
+    /// Opens all iothub domain stores under one data directory.
+    pub fn open(io: std.Io, allocator: std.mem.Allocator, data_dir: []const u8) !IotHub {
         const devices_dir = try std.fmt.allocPrint(allocator, "{s}/devices", .{data_dir});
         defer allocator.free(devices_dir);
         const readings_dir = try std.fmt.allocPrint(allocator, "{s}/readings", .{data_dir});
@@ -68,7 +68,7 @@ pub const Platform = struct {
         defer allocator.free(broker_dir);
         const audit_dir = try std.fmt.allocPrint(allocator, "{s}/audit", .{data_dir});
         defer allocator.free(audit_dir);
-        var platform = Platform{
+        var iothub = IotHub{
             .allocator = allocator,
             .io = io,
             .devices = try storage.Store.open(io, allocator, .{ .data_dir = devices_dir }),
@@ -79,25 +79,25 @@ pub const Platform = struct {
             .audit = undefined,
             .rules = .empty,
         };
-        errdefer platform.deinit();
-        platform.readings = try storage.Store.open(io, allocator, .{ .data_dir = readings_dir });
-        platform.rules_store = try storage.Store.open(io, allocator, .{ .data_dir = rules_dir });
-        platform.alerts_store = try storage.Store.open(io, allocator, .{ .data_dir = alerts_dir });
-        platform.broker = try broker.Broker.open(io, allocator, .{ .data_dir = broker_dir });
-        platform.audit = try audit.Store.open(io, allocator, .{ .data_dir = audit_dir });
-        const persisted_rules = try platform.rules_store.list();
+        errdefer iothub.deinit();
+        iothub.readings = try storage.Store.open(io, allocator, .{ .data_dir = readings_dir });
+        iothub.rules_store = try storage.Store.open(io, allocator, .{ .data_dir = rules_dir });
+        iothub.alerts_store = try storage.Store.open(io, allocator, .{ .data_dir = alerts_dir });
+        iothub.broker = try broker.Broker.open(io, allocator, .{ .data_dir = broker_dir });
+        iothub.audit = try audit.Store.open(io, allocator, .{ .data_dir = audit_dir });
+        const persisted_rules = try iothub.rules_store.list();
         defer storage.freeRecordsForExample(allocator, persisted_rules);
         for (persisted_rules) |record| {
             const encoded = try hexDecode(allocator, record.value.bytes);
             defer allocator.free(encoded);
             const rule = try memorypack.decode(Rule, allocator, encoded);
-            try platform.rules.append(allocator, rule);
+            try iothub.rules.append(allocator, rule);
         }
-        return platform;
+        return iothub;
     }
 
     /// Closes every domain store.
-    pub fn deinit(self: *Platform) void {
+    pub fn deinit(self: *IotHub) void {
         self.mutex.lockUncancelable(self.io);
         if (self.closed) {
             self.mutex.unlock(self.io);
@@ -116,7 +116,7 @@ pub const Platform = struct {
     }
 
     /// Registers a device and records provisioning in the audit chain.
-    pub fn registerDevice(self: *Platform, device: Device) !void {
+    pub fn registerDevice(self: *IotHub, device: Device) !void {
         const bytes = try memorypack.encode(self.allocator, device);
         defer self.allocator.free(bytes);
         const encoded = try hexEncode(self.allocator, bytes);
@@ -125,8 +125,53 @@ pub const Platform = struct {
         _ = try self.audit.append("operator", "device.register", device.id.bytes);
     }
 
+    /// Returns a persisted device by identifier, or null when absent.
+    pub fn getDevice(self: *IotHub, id: []const u8) !?Device {
+        const encoded = (try self.devices.get(id)) orelse return null;
+        defer self.allocator.free(encoded.bytes);
+        const bytes = try hexDecode(self.allocator, encoded.bytes);
+        defer self.allocator.free(bytes);
+        const device = try memorypack.decode(Device, self.allocator, bytes);
+        return device;
+    }
+
+    /// Returns persisted devices with offset/limit pagination.
+    pub fn listDevices(self: *IotHub, offset: usize, limit: usize) ![]Device {
+        if (limit == 0 or limit > 10000) return error.InvalidInput;
+        const records = try self.devices.list();
+        defer storage.freeRecordsForExample(self.allocator, records);
+        var result: std.ArrayList(Device) = .empty;
+        errdefer freeDevices(self.allocator, result.items);
+        var skipped: usize = 0;
+        for (records) |record| {
+            if (skipped < offset) {
+                skipped += 1;
+                continue;
+            }
+            const bytes = try hexDecode(self.allocator, record.value.bytes);
+            defer self.allocator.free(bytes);
+            try result.append(self.allocator, try memorypack.decode(Device, self.allocator, bytes));
+            if (result.items.len == limit) break;
+        }
+        return result.toOwnedSlice(self.allocator);
+    }
+
+    /// Marks a device decommissioned and records the lifecycle action.
+    pub fn decommissionDevice(self: *IotHub, id: []const u8) !bool {
+        var device = (try self.getDevice(id)) orelse return false;
+        defer memorypack.deinit(Device, self.allocator, &device);
+        device.status = .decommissioned;
+        const bytes = try memorypack.encode(self.allocator, device);
+        defer self.allocator.free(bytes);
+        const encoded = try hexEncode(self.allocator, bytes);
+        defer self.allocator.free(encoded);
+        try self.devices.put(id, encoded);
+        _ = try self.audit.append("operator", "device.decommission", id);
+        return true;
+    }
+
     /// Adds a threshold rule for a device metric.
-    pub fn addRule(self: *Platform, rule: Rule) !void {
+    pub fn addRule(self: *IotHub, rule: Rule) !void {
         const bytes = try memorypack.encode(self.allocator, rule);
         defer self.allocator.free(bytes);
         const encoded = try hexEncode(self.allocator, bytes);
@@ -137,7 +182,7 @@ pub const Platform = struct {
     }
 
     /// Persists a reading and publishes it to the alert topic.
-    pub fn ingest(self: *Platform, reading: Reading) !void {
+    pub fn ingest(self: *IotHub, reading: Reading) !void {
         const bytes = try memorypack.encode(self.allocator, reading);
         defer self.allocator.free(bytes);
         const encoded = try hexEncode(self.allocator, bytes);
@@ -149,7 +194,7 @@ pub const Platform = struct {
     }
 
     /// Processes telemetry using at-least-once broker fetch/commit semantics.
-    pub fn processAlerts(self: *Platform, max: usize) !usize {
+    pub fn processAlerts(self: *IotHub, max: usize) !usize {
         const events = try self.broker.fetch("telemetry", "alerting", max);
         defer {
             for (events) |*event| broker.deinitEvent(self.allocator, event);
@@ -186,7 +231,7 @@ pub const Platform = struct {
     }
 
     /// Queries persisted readings by device/metric/time range.
-    pub fn queryReadings(self: *Platform, device: []const u8, metric: []const u8, start: i64, end: i64, limit: usize) ![]Reading {
+    pub fn queryReadings(self: *IotHub, device: []const u8, metric: []const u8, start: i64, end: i64, limit: usize) ![]Reading {
         const records = try self.readings.list();
         defer storage.freeRecordsForExample(self.allocator, records);
         var result: std.ArrayList(Reading) = .empty;
@@ -207,7 +252,7 @@ pub const Platform = struct {
     }
 
     /// Lists active alerts stored by the alerting consumer.
-    pub fn alerts(self: *Platform) ![]Alert {
+    pub fn alerts(self: *IotHub) ![]Alert {
         const records = try self.alerts_store.list();
         defer storage.freeRecordsForExample(self.allocator, records);
         var result: std.ArrayList(Alert) = .empty;
@@ -236,6 +281,18 @@ fn freeReadings(allocator: std.mem.Allocator, values: []Reading) void {
 fn freeAlerts(allocator: std.mem.Allocator, values: []Alert) void {
     for (values) |*value| memorypack.deinit(Alert, allocator, value);
     allocator.free(values);
+}
+fn freeDevices(allocator: std.mem.Allocator, values: []Device) void {
+    for (values) |*value| memorypack.deinit(Device, allocator, value);
+    allocator.free(values);
+}
+
+pub fn freeDevice(allocator: std.mem.Allocator, value: *Device) void {
+    memorypack.deinit(Device, allocator, value);
+}
+
+pub fn freeDeviceList(allocator: std.mem.Allocator, values: []Device) void {
+    freeDevices(allocator, values);
 }
 
 fn hexEncode(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
@@ -270,16 +327,42 @@ fn hexDigit(value: u8) !u8 {
 test "services ingest and alert flow" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const dir = "zig-cache/platform-services";
+    const dir = "zig-cache/iothub-services";
     std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
-    var platform = try Platform.open(io, allocator, dir);
-    defer platform.deinit();
-    try platform.registerDevice(.{ .id = .{ .bytes = "d1" }, .name = .{ .bytes = "Kitchen" }, .kind = .sensor, .status = .active, .tags = &.{}, .registered_at = 1 });
-    try platform.addRule(.{ .id = .{ .bytes = "hot" }, .device_id = .{ .bytes = "d1" }, .metric = .{ .bytes = "temp" }, .op = .gt, .threshold = 20 });
-    try platform.ingest(.{ .device_id = .{ .bytes = "d1" }, .metric = .{ .bytes = "temp" }, .value = 25, .timestamp = 1 });
-    try std.testing.expectEqual(@as(usize, 1), try platform.processAlerts(10));
-    const values = try platform.alerts();
+    var iothub = try IotHub.open(io, allocator, dir);
+    defer iothub.deinit();
+    try iothub.registerDevice(.{ .id = .{ .bytes = "d1" }, .name = .{ .bytes = "Kitchen" }, .kind = .sensor, .status = .active, .tags = &.{}, .registered_at = 1 });
+    try iothub.addRule(.{ .id = .{ .bytes = "hot" }, .device_id = .{ .bytes = "d1" }, .metric = .{ .bytes = "temp" }, .op = .gt, .threshold = 20 });
+    try iothub.ingest(.{ .device_id = .{ .bytes = "d1" }, .metric = .{ .bytes = "temp" }, .value = 25, .timestamp = 1 });
+    try std.testing.expectEqual(@as(usize, 1), try iothub.processAlerts(10));
+    const values = try iothub.alerts();
     defer freeAlerts(allocator, values);
     try std.testing.expectEqual(@as(usize, 1), values.len);
+}
+
+test "device registry get list decommission persists and audits" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const dir = "zig-cache/iothub-device-registry";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    var iothub = try IotHub.open(io, allocator, dir);
+    defer iothub.deinit();
+    try iothub.registerDevice(.{ .id = .{ .bytes = "d1" }, .name = .{ .bytes = "One" }, .kind = .sensor, .status = .active, .tags = &.{}, .registered_at = 1 });
+    try iothub.registerDevice(.{ .id = .{ .bytes = "d2" }, .name = .{ .bytes = "Two" }, .kind = .gateway, .status = .active, .tags = &.{}, .registered_at = 2 });
+    var found = (try iothub.getDevice("d1")).?;
+    defer freeDevice(allocator, &found);
+    try std.testing.expectEqual(DeviceStatus.active, found.status);
+    const page = try iothub.listDevices(0, 1);
+    defer freeDeviceList(allocator, page);
+    try std.testing.expectEqual(@as(usize, 1), page.len);
+    try std.testing.expectEqualStrings("d1", page[0].id.bytes);
+    try std.testing.expect(try iothub.decommissionDevice("d1"));
+    var reopened = try IotHub.open(io, allocator, dir);
+    defer reopened.deinit();
+    var decommissioned = (try reopened.getDevice("d1")).?;
+    defer freeDevice(allocator, &decommissioned);
+    try std.testing.expectEqual(DeviceStatus.decommissioned, decommissioned.status);
+    try std.testing.expect(try reopened.audit.verify());
 }

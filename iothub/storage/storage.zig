@@ -244,7 +244,7 @@ pub fn freeRecordsForExample(allocator: std.mem.Allocator, records: []KV) void {
 test "storage WAL recovery and compaction" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const dir = "zig-cache/platform-storage";
+    const dir = "zig-cache/iothub-storage";
     std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     var store = try Store.open(io, allocator, .{ .data_dir = dir });

@@ -209,7 +209,7 @@ fn freeEvents(allocator: std.mem.Allocator, events: []Event) void {
 test "broker publish fetch commit and redelivery" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const dir = "zig-cache/platform-broker";
+    const dir = "zig-cache/iothub-broker";
     std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     var broker = try Broker.open(io, allocator, .{ .data_dir = dir });

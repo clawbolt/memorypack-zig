@@ -195,146 +195,146 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(audit_tests).step);
 
-    const platform_core = b.addModule("platform-core", .{
-        .root_source_file = b.path("platform/core/core.zig"),
+    const iothub_core = b.addModule("iothub-core", .{
+        .root_source_file = b.path("iothub/core/core.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "memorypack", .module = module }},
     });
-    const platform_storage = b.addModule("platform-storage", .{
-        .root_source_file = b.path("platform/storage/storage.zig"),
+    const iothub_storage = b.addModule("iothub-storage", .{
+        .root_source_file = b.path("iothub/storage/storage.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "memorypack", .module = module },
-            .{ .name = "core", .module = platform_core },
+            .{ .name = "core", .module = iothub_core },
         },
     });
-    const platform_core_tests = b.addTest(.{
+    const iothub_core_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("platform/core/core.zig"),
+            .root_source_file = b.path("iothub/core/core.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "memorypack", .module = module }},
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(platform_core_tests).step);
-    const platform_storage_tests = b.addTest(.{
+    test_step.dependOn(&b.addRunArtifact(iothub_core_tests).step);
+    const iothub_storage_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("platform/storage/storage.zig"),
+            .root_source_file = b.path("iothub/storage/storage.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "memorypack", .module = module },
-                .{ .name = "core", .module = platform_core },
+                .{ .name = "core", .module = iothub_core },
             },
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(platform_storage_tests).step);
+    test_step.dependOn(&b.addRunArtifact(iothub_storage_tests).step);
 
-    const platform_broker = b.addModule("platform-broker", .{
-        .root_source_file = b.path("platform/broker/broker.zig"),
+    const iothub_broker = b.addModule("iothub-broker", .{
+        .root_source_file = b.path("iothub/broker/broker.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "memorypack", .module = module },
-            .{ .name = "core", .module = platform_core },
+            .{ .name = "core", .module = iothub_core },
         },
     });
-    const platform_audit = b.addModule("platform-audit", .{
-        .root_source_file = b.path("platform/audit/audit.zig"),
+    const iothub_audit = b.addModule("iothub-audit", .{
+        .root_source_file = b.path("iothub/audit/audit.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "memorypack", .module = module }},
     });
-    const platform_services = b.addModule("platform-services", .{
-        .root_source_file = b.path("platform/services/services.zig"),
+    const iothub_services = b.addModule("iothub-services", .{
+        .root_source_file = b.path("iothub/services/services.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "memorypack", .module = module },
-            .{ .name = "storage", .module = platform_storage },
-            .{ .name = "broker", .module = platform_broker },
-            .{ .name = "audit", .module = platform_audit },
+            .{ .name = "storage", .module = iothub_storage },
+            .{ .name = "broker", .module = iothub_broker },
+            .{ .name = "audit", .module = iothub_audit },
         },
     });
-    const platform_broker_tests = b.addTest(.{
+    const iothub_broker_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("platform/broker/broker.zig"),
+            .root_source_file = b.path("iothub/broker/broker.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "memorypack", .module = module },
-                .{ .name = "core", .module = platform_core },
+                .{ .name = "core", .module = iothub_core },
             },
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(platform_broker_tests).step);
-    const platform_audit_tests = b.addTest(.{
+    test_step.dependOn(&b.addRunArtifact(iothub_broker_tests).step);
+    const iothub_audit_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("platform/audit/audit.zig"),
+            .root_source_file = b.path("iothub/audit/audit.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "memorypack", .module = module }},
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(platform_audit_tests).step);
-    const platform_services_tests = b.addTest(.{
+    test_step.dependOn(&b.addRunArtifact(iothub_audit_tests).step);
+    const iothub_services_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("platform/services/services.zig"),
+            .root_source_file = b.path("iothub/services/services.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "memorypack", .module = module },
-                .{ .name = "storage", .module = platform_storage },
-                .{ .name = "broker", .module = platform_broker },
-                .{ .name = "audit", .module = platform_audit },
+                .{ .name = "storage", .module = iothub_storage },
+                .{ .name = "broker", .module = iothub_broker },
+                .{ .name = "audit", .module = iothub_audit },
             },
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(platform_services_tests).step);
+    test_step.dependOn(&b.addRunArtifact(iothub_services_tests).step);
 
-    const platform_gateway = b.addModule("platform-gateway", .{
-        .root_source_file = b.path("platform/gateway/gateway.zig"),
+    const iothub_gateway = b.addModule("iothub-gateway", .{
+        .root_source_file = b.path("iothub/gateway/gateway.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "memorypack", .module = module },
-            .{ .name = "core", .module = platform_core },
-            .{ .name = "services", .module = platform_services },
+            .{ .name = "core", .module = iothub_core },
+            .{ .name = "services", .module = iothub_services },
         },
     });
-    const platform_cli = b.addExecutable(.{
-        .name = "platform",
+    const iothub_cli = b.addExecutable(.{
+        .name = "iothub",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("platform/cli/main.zig"),
+            .root_source_file = b.path("iothub/cli/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "memorypack", .module = module },
-                .{ .name = "core", .module = platform_core },
-                .{ .name = "gateway", .module = platform_gateway },
-                .{ .name = "services", .module = platform_services },
+                .{ .name = "core", .module = iothub_core },
+                .{ .name = "gateway", .module = iothub_gateway },
+                .{ .name = "services", .module = iothub_services },
             },
         }),
     });
-    const run_platform = b.addRunArtifact(platform_cli);
-    if (b.args) |args| run_platform.addArgs(args);
-    b.step("platform", "Run the IoT telemetry platform").dependOn(&run_platform.step);
-    const platform_gateway_tests = b.addTest(.{
+    const run_iothub = b.addRunArtifact(iothub_cli);
+    if (b.args) |args| run_iothub.addArgs(args);
+    b.step("iothub", "Run the IoT Hub telemetry service").dependOn(&run_iothub.step);
+    const iothub_gateway_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("platform/gateway/gateway.zig"),
+            .root_source_file = b.path("iothub/gateway/gateway.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "memorypack", .module = module },
-                .{ .name = "core", .module = platform_core },
-                .{ .name = "services", .module = platform_services },
+                .{ .name = "core", .module = iothub_core },
+                .{ .name = "services", .module = iothub_services },
             },
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(platform_gateway_tests).step);
-    const platform_e2e = b.addSystemCommand(&.{ "sh", "platform/e2e/run.sh" });
-    if (b.args) |args| platform_e2e.addArgs(args);
-    b.step("platform-e2e", "Run the IoT platform end-to-end flow").dependOn(&platform_e2e.step);
+    test_step.dependOn(&b.addRunArtifact(iothub_gateway_tests).step);
+    const iothub_e2e = b.addSystemCommand(&.{ "sh", "iothub/e2e/run.sh" });
+    if (b.args) |args| iothub_e2e.addArgs(args);
+    b.step("iothub-e2e", "Run the IoT Hub end-to-end flow").dependOn(&iothub_e2e.step);
 }

@@ -6,6 +6,9 @@ const services = @import("services");
 pub const RequestKind = enum(u8) {
     ping,
     register_device,
+    get_device,
+    list_devices,
+    decommission_device,
     ingest,
     add_rule,
     query,
@@ -19,6 +22,9 @@ const Empty = struct {};
 pub const Request = union(RequestKind) {
     ping: Auth,
     register_device: RegisterRequest,
+    get_device: DeviceRequest,
+    list_devices: DeviceListRequest,
+    decommission_device: DeviceRequest,
     ingest: IngestRequest,
     add_rule: RuleRequest,
     query: QueryRequest,
@@ -36,6 +42,15 @@ pub const RegisterRequest = struct {
     id: memorypack.Str,
     name: memorypack.Str,
     kind: services.DeviceKind,
+};
+pub const DeviceRequest = struct {
+    token: memorypack.Str,
+    id: memorypack.Str,
+};
+pub const DeviceListRequest = struct {
+    token: memorypack.Str,
+    offset: u32,
+    limit: u32,
 };
 pub const IngestRequest = struct {
     token: memorypack.Str,
@@ -74,7 +89,7 @@ pub const Gateway = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     config: core.Config,
-    platform: services.Platform,
+    iothub: services.IotHub,
     metrics: core.Metrics = .{},
     window_second: i64 = 0,
     token_calls: std.ArrayList(usize),
@@ -86,19 +101,19 @@ pub const Gateway = struct {
             .allocator = allocator,
             .io = io,
             .config = config,
-            .platform = try services.Platform.open(io, allocator, config.data_dir),
+            .iothub = try services.IotHub.open(io, allocator, config.data_dir),
             .token_calls = .empty,
         };
         errdefer gateway.deinit();
         for (config.api_tokens) |_| try gateway.token_calls.append(allocator, 0);
-        _ = try gateway.platform.processAlerts(1000);
+        _ = try gateway.iothub.processAlerts(1000);
         return gateway;
     }
 
-    /// Closes all platform resources.
+    /// Closes all iothub resources.
     pub fn deinit(self: *Gateway) void {
         self.token_calls.deinit(self.allocator);
-        self.platform.deinit();
+        self.iothub.deinit();
     }
 
     /// Authenticates, rate-limits, and routes one request.
@@ -108,7 +123,6 @@ pub const Gateway = struct {
             self.metrics.rejected_auth += 1;
             return self.failure("unauthorized");
         };
-        _ = role;
         if (!self.rateAllowed(token)) {
             self.metrics.rejected_rate += 1;
             return self.failure("rate limited");
@@ -116,7 +130,10 @@ pub const Gateway = struct {
         self.metrics.requests += 1;
         return switch (request) {
             .ping => self.success("pong", 0),
-            .register_device => |value| self.register(value),
+            .register_device => |value| if (role == .viewer) self.failure("forbidden") else self.register(value),
+            .get_device => |value| self.getDevice(value),
+            .list_devices => |value| self.listDevices(value),
+            .decommission_device => |value| if (role == .viewer) self.failure("forbidden") else self.decommission(value),
             .ingest => |value| self.ingest(value),
             .add_rule => |value| self.addRule(value),
             .query => |value| self.query(value),
@@ -155,23 +172,53 @@ pub const Gateway = struct {
     }
 
     fn register(self: *Gateway, value: RegisterRequest) !Response {
-        try self.platform.registerDevice(.{ .id = value.id, .name = value.name, .kind = value.kind, .status = .active, .tags = &.{}, .registered_at = @intCast(@divTrunc(std.Io.Clock.real.now(self.io).nanoseconds, 1_000_000_000)) });
+        try self.iothub.registerDevice(.{ .id = value.id, .name = value.name, .kind = value.kind, .status = .active, .tags = &.{}, .registered_at = @intCast(@divTrunc(std.Io.Clock.real.now(self.io).nanoseconds, 1_000_000_000)) });
         return self.success("device registered", 1);
     }
 
+    fn getDevice(self: *Gateway, value: DeviceRequest) !Response {
+        var device = (try self.iothub.getDevice(value.id.bytes)) orelse return self.failure("device not found");
+        defer services.freeDevice(self.allocator, &device);
+        return self.deviceResponse(device, "device found");
+    }
+
+    fn listDevices(self: *Gateway, value: DeviceListRequest) !Response {
+        const devices = try self.iothub.listDevices(value.offset, value.limit);
+        defer services.freeDeviceList(self.allocator, devices);
+        var items: std.ArrayList(memorypack.Str) = .empty;
+        errdefer freeItems(self.allocator, items.items);
+        for (devices) |device| {
+            const text = try std.fmt.allocPrint(self.allocator, "{s} {s} {s} {s}", .{ device.id.bytes, device.name.bytes, @tagName(device.kind), @tagName(device.status) });
+            try items.append(self.allocator, .{ .bytes = text });
+        }
+        return .{ .ok = true, .message = .{ .bytes = "devices" }, .count = @intCast(items.items.len), .value = .{ .bytes = "" }, .items = try items.toOwnedSlice(self.allocator), .intact = true };
+    }
+
+    fn decommission(self: *Gateway, value: DeviceRequest) !Response {
+        if (!try self.iothub.decommissionDevice(value.id.bytes)) return self.failure("device not found");
+        return self.success("device decommissioned", 1);
+    }
+
+    fn deviceResponse(self: *Gateway, device: services.Device, message: []const u8) !Response {
+        const text = try std.fmt.allocPrint(self.allocator, "{s} {s} {s} {s}", .{ device.id.bytes, device.name.bytes, @tagName(device.kind), @tagName(device.status) });
+        var items: std.ArrayList(memorypack.Str) = .empty;
+        try items.append(self.allocator, .{ .bytes = text });
+        return .{ .ok = true, .message = .{ .bytes = message }, .count = 1, .value = .{ .bytes = "" }, .items = try items.toOwnedSlice(self.allocator), .intact = true };
+    }
+
     fn ingest(self: *Gateway, value: IngestRequest) !Response {
-        try self.platform.ingest(.{ .device_id = value.device_id, .metric = value.metric, .value = value.value, .timestamp = value.timestamp });
-        _ = try self.platform.processAlerts(100);
+        try self.iothub.ingest(.{ .device_id = value.device_id, .metric = value.metric, .value = value.value, .timestamp = value.timestamp });
+        _ = try self.iothub.processAlerts(100);
         return self.success("reading ingested", 1);
     }
 
     fn addRule(self: *Gateway, value: RuleRequest) !Response {
-        try self.platform.addRule(.{ .id = value.id, .device_id = value.device_id, .metric = value.metric, .op = value.op, .threshold = value.threshold });
+        try self.iothub.addRule(.{ .id = value.id, .device_id = value.device_id, .metric = value.metric, .op = value.op, .threshold = value.threshold });
         return self.success("rule added", 1);
     }
 
     fn query(self: *Gateway, value: QueryRequest) !Response {
-        const readings = try self.platform.queryReadings(value.device_id.bytes, value.metric.bytes, value.start, value.end, value.limit);
+        const readings = try self.iothub.queryReadings(value.device_id.bytes, value.metric.bytes, value.start, value.end, value.limit);
         defer {
             for (readings) |*reading| memorypack.deinit(services.Reading, self.allocator, reading);
             self.allocator.free(readings);
@@ -186,7 +233,7 @@ pub const Gateway = struct {
     }
 
     fn listAlerts(self: *Gateway) !Response {
-        const alerts = try self.platform.alerts();
+        const alerts = try self.iothub.alerts();
         defer {
             for (alerts) |*alert| memorypack.deinit(services.Alert, self.allocator, alert);
             self.allocator.free(alerts);
@@ -201,14 +248,14 @@ pub const Gateway = struct {
     }
 
     fn verify(self: *Gateway) !Response {
-        const intact = try self.platform.audit.verify();
+        const intact = try self.iothub.audit.verify();
         return .{ .ok = intact, .message = .{ .bytes = if (intact) "audit intact" else "audit tampering detected" }, .count = 0, .value = .{ .bytes = "" }, .items = &.{}, .intact = intact };
     }
 
     fn stats(self: *Gateway) !Response {
-        const devices = try self.platform.devices.stats();
-        const readings = try self.platform.readings.stats();
-        const alerts = try self.platform.alerts_store.stats();
+        const devices = try self.iothub.devices.stats();
+        const readings = try self.iothub.readings.stats();
+        const alerts = try self.iothub.alerts_store.stats();
         return self.success("stats", @intCast(devices.records + readings.records + alerts.records));
     }
 
@@ -227,6 +274,9 @@ fn requestToken(request: Request) []const u8 {
     return switch (request) {
         .ping => |v| v.token.bytes,
         .register_device => |v| v.token.bytes,
+        .get_device => |v| v.token.bytes,
+        .list_devices => |v| v.token.bytes,
+        .decommission_device => |v| v.token.bytes,
         .ingest => |v| v.token.bytes,
         .add_rule => |v| v.token.bytes,
         .query => |v| v.token.bytes,
@@ -249,7 +299,7 @@ pub fn freeResponse(allocator: std.mem.Allocator, response: *Response) void {
 test "gateway rejects invalid auth and enforces rate limit" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const dir = "zig-cache/platform-gateway";
+    const dir = "zig-cache/iothub-gateway";
     std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     const tokens = [_]core.Token{.{ .value = "good", .role = .admin }};
@@ -261,4 +311,32 @@ test "gateway rejects invalid auth and enforces rate limit" {
     try std.testing.expect(good.ok);
     const limited = try gateway.handle(.{ .ping = .{ .token = .{ .bytes = "good" } } });
     try std.testing.expect(!limited.ok);
+}
+
+test "gateway device registry role enforcement" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const dir = "zig-cache/iothub-gateway-devices";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const tokens = [_]core.Token{
+        .{ .value = "admin", .role = .admin },
+        .{ .value = "viewer", .role = .viewer },
+    };
+    var gateway = try Gateway.open(io, allocator, .{ .data_dir = dir, .rate_limit = 20, .api_tokens = &tokens });
+    defer gateway.deinit();
+    const registered = try gateway.handle(.{ .register_device = .{ .token = .{ .bytes = "admin" }, .id = .{ .bytes = "d1" }, .name = .{ .bytes = "One" }, .kind = .sensor } });
+    try std.testing.expect(registered.ok);
+    var listed = try gateway.handle(.{ .list_devices = .{ .token = .{ .bytes = "viewer" }, .offset = 0, .limit = 10 } });
+    defer freeResponse(allocator, &listed);
+    try std.testing.expect(listed.ok);
+    try std.testing.expectEqual(@as(i64, 1), listed.count);
+    const forbidden = try gateway.handle(.{ .decommission_device = .{ .token = .{ .bytes = "viewer" }, .id = .{ .bytes = "d1" } } });
+    try std.testing.expect(!forbidden.ok);
+    const decommissioned = try gateway.handle(.{ .decommission_device = .{ .token = .{ .bytes = "admin" }, .id = .{ .bytes = "d1" } } });
+    try std.testing.expect(decommissioned.ok);
+    var found = try gateway.handle(.{ .get_device = .{ .token = .{ .bytes = "viewer" }, .id = .{ .bytes = "d1" } } });
+    defer freeResponse(allocator, &found);
+    try std.testing.expect(found.ok);
+    try std.testing.expect(std.mem.endsWith(u8, found.items[0].bytes, "decommissioned"));
 }

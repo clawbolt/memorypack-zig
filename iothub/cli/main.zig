@@ -42,7 +42,7 @@ fn serve(init: std.process.Init, allocator: std.mem.Allocator, data_dir: []const
     const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(listen_port) };
     var server = try address.listen(init.io, .{ .reuse_address = true });
     defer server.deinit(init.io);
-    core.log(.info, "gateway", "platform gateway listening");
+    core.log(.info, "gateway", "iothub gateway listening");
     while (!app.stopping) {
         var stream = try server.accept(init.io);
         defer stream.close(init.io);
@@ -115,6 +115,12 @@ fn client(init: std.process.Init, allocator: std.mem.Allocator, command: []const
         request = .{ .ping = .{ .token = auth(args) } };
     } else if (std.mem.eql(u8, command, "register-device")) {
         request = .{ .register_device = .{ .token = auth(args), .id = .{ .bytes = flag(args, "--id", "device-1") }, .name = .{ .bytes = flag(args, "--name", "Sensor") }, .kind = .sensor } };
+    } else if (std.mem.eql(u8, command, "get-device")) {
+        request = .{ .get_device = .{ .token = auth(args), .id = .{ .bytes = flag(args, "--id", "device-1") } } };
+    } else if (std.mem.eql(u8, command, "list-devices")) {
+        request = .{ .list_devices = .{ .token = auth(args), .offset = try std.fmt.parseInt(u32, flag(args, "--offset", "0"), 10), .limit = try std.fmt.parseInt(u32, flag(args, "--limit", "100"), 10) } };
+    } else if (std.mem.eql(u8, command, "decommission-device")) {
+        request = .{ .decommission_device = .{ .token = auth(args), .id = .{ .bytes = flag(args, "--id", "device-1") } } };
     } else if (std.mem.eql(u8, command, "add-rule")) {
         request = .{ .add_rule = .{ .token = auth(args), .id = .{ .bytes = flag(args, "--id", "rule-1") }, .device_id = .{ .bytes = flag(args, "--device", "device-1") }, .metric = .{ .bytes = flag(args, "--metric", "temperature") }, .op = .gt, .threshold = try std.fmt.parseFloat(f64, flag(args, "--threshold", "20")) } };
     } else if (std.mem.eql(u8, command, "ingest")) {

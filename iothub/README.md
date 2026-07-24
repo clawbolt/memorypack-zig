@@ -1,6 +1,6 @@
-# MemoryPack IoT telemetry platform
+# MemoryPack IoT Hub
 
-`platform/` is the flagship pure-Zig system showcase in this repository. It
+`iothub/` is the flagship pure-Zig system showcase in this repository. It
 combines a device registry, durable telemetry ingestion, event-driven
 threshold alerting, time-series queries, compliance auditing, and an
 authenticated TCP gateway. Every persisted record and wire request is
@@ -10,16 +10,16 @@ MemoryPack encoded.
 
 ```text
                  +----------------------+
- operator/client | platform/cli         |
+ operator/client | iothub/cli         |
                  +----------+-----------+
                             | MemoryPack TCP
                  +----------v-----------+
-                 | platform/gateway     |
+                 | iothub/gateway     |
                  | auth + rate limiting |
                  +----------+-----------+
                             |
                  +----------v-----------+
-                 | platform/services    |
+                 | iothub/services    |
                  | registry / ingest    |
                  | alerting / queries   |
                  +----+----------+------+
@@ -41,31 +41,38 @@ MemoryPack encoded.
 
 ## Data flow
 
-1. An operator registers a device and adds an alert rule.
-2. The gateway authenticates the request and routes it to services.
-3. Ingestion persists a `Reading` under a namespaced time-series key and
+1. An operator registers, gets, lists, or decommissions devices. Lifecycle
+   changes are appended to the audit chain.
+2. An operator adds an alert rule.
+3. The gateway authenticates the request and routes it to services.
+4. Ingestion persists a `Reading` under a namespaced time-series key and
    publishes a MemoryPack event to the telemetry topic.
-4. The alerting consumer fetches events, evaluates rules, persists alerts, and
+5. The alerting consumer fetches events, evaluates rules, persists alerts, and
    commits its consumer offset.
-5. Queries read the durable reading collection; audit verification checks the
+6. Queries read the durable reading collection; audit verification checks the
    compliance chain.
 
 ## Run the demo
 
 ```sh
 export PATH="$HOME/.dotnet:$HOME/.bin:$HOME/.local/bin:$HOME/.asdf/shims:$PATH"
-./platform/e2e/run.sh
+./iothub/e2e/run.sh
 ```
 
 Or start the service manually:
 
 ```sh
-zig build platform -- serve ./platform-data --port 39561
-zig build platform -- register-device --port 39561 --token admin-token \
+zig build iothub -- serve ./iothub-data --port 39561
+zig build iothub -- register-device --port 39561 --token admin-token \
   --id sensor-1 --name "Boiler sensor"
-zig build platform -- ingest --port 39561 --token operator-token \
+zig build iothub -- list-devices --port 39561 --token viewer-token
+zig build iothub -- get-device --port 39561 --token viewer-token \
+  --id sensor-1
+zig build iothub -- decommission-device --port 39561 --token operator-token \
+  --id sensor-1
+zig build iothub -- ingest --port 39561 --token operator-token \
   --device sensor-1 --metric temperature --value 25 --timestamp 101
-zig build platform -- alerts --port 39561 --token viewer-token
+zig build iothub -- alerts --port 39561 --token viewer-token
 ```
 
 ## Persistence and guarantees
@@ -83,7 +90,7 @@ reprocessing the same event replaces the same logical alert rather than
 creating an unbounded duplicate in the demo. This is not a distributed
 exactly-once guarantee.
 
-This is a single-node platform. It has no replication, partition leadership,
+This is a single-node system. It has no replication, partition leadership,
 multi-node consensus, encryption, or cross-record transactions. Snapshot
 rename durability has the same filesystem directory-fsync portability caveat
 as the existing examples. Audit is tamper-evident, not tamper-proof: an
@@ -138,6 +145,9 @@ CLI commands:
 ```text
 serve <dir> --port N
 register-device
+get-device
+list-devices
+decommission-device
 ingest
 add-rule
 query
@@ -155,7 +165,8 @@ shutdown
   `compact`, `stats`.
 - `broker.Broker`: `open`, `publish`, `fetch`, `commit`, `stats`.
 - `audit.Store`: `open`, `append`, `verify`, `deinit`.
-- `services.Platform`: `registerDevice`, `addRule`, `ingest`,
+- `services.IotHub`: `registerDevice`, `getDevice`, `listDevices`,
+  `decommissionDevice`, `addRule`, `ingest`,
   `processAlerts`, `queryReadings`, `alerts`.
 - `gateway.Gateway`: `open`, `handle`, `deinit`.
 
@@ -175,6 +186,15 @@ rate limit: rejected request after configured budget
 
 === Device registry and alert rule ===
 register-device: ok=true count=1 intact=true message=device registered
+list-devices: ok=true count=2 intact=true message=devices
+  sensor-1 Boiler sensor sensor active
+  sensor-2 Room sensor sensor active
+get-device: ok=true count=1 intact=true message=device found
+  sensor-1 Boiler sensor sensor active
+decommission-device: ok=true count=1 intact=true message=device decommissioned
+get-device: ok=true count=1 intact=true message=device found
+  sensor-2 Room sensor sensor decommissioned
+audit-verify: ok=true count=0 intact=true message=audit intact
 add-rule: ok=true count=1 intact=true message=rule added
 
 === Telemetry ingestion and event-driven alert processing ===
@@ -194,7 +214,7 @@ audit-verify: ok=true count=0 intact=true message=audit intact
 === Metrics snapshot ===
 stats: ok=true count=4 intact=true message=stats
 
-=== IoT telemetry platform flow complete ===
+=== IoT Hub telemetry flow complete ===
 ```
 
 The exact counters can vary with additional operator requests, but the

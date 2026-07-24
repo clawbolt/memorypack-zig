@@ -9,7 +9,7 @@ pub const Error = error{
 } || std.mem.Allocator.Error;
 
 pub const Config = struct {
-    data_dir: []const u8 = "platform-data",
+    data_dir: []const u8 = "iothub-data",
     api_port: u16 = 39551,
     max_frame_size: usize = 1024 * 1024,
     rate_limit: usize = 20,
@@ -34,7 +34,7 @@ pub const Level = enum {
 };
 
 pub fn log(level: Level, component: []const u8, message: []const u8) void {
-    std.debug.print("[platform][{s}][{s}] {s}\n", .{ @tagName(level), component, message });
+    std.debug.print("[iothub][{s}][{s}] {s}\n", .{ @tagName(level), component, message });
 }
 
 pub const Metrics = struct {

@@ -33,13 +33,13 @@ pub const Store = struct {
     mutex: std.Io.Mutex = .init,
     closed: bool = false,
 
-    /// Opens and recovers the platform audit chain.
+    /// Opens and recovers the iothub audit chain.
     pub fn open(io: std.Io, allocator: std.mem.Allocator, options: Options) !Store {
         std.Io.Dir.cwd().createDirPath(io, options.data_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
-        const path = try std.fmt.allocPrint(allocator, "{s}/platform-audit.log", .{options.data_dir});
+        const path = try std.fmt.allocPrint(allocator, "{s}/iothub-audit.log", .{options.data_dir});
         errdefer allocator.free(path);
         var store = Store{ .allocator = allocator, .io = io, .path = path, .entries = .empty };
         errdefer store.deinit();
@@ -139,10 +139,10 @@ fn deinitEntry(allocator: std.mem.Allocator, entry: *Entry) void {
     allocator.free(entry.detail.bytes);
 }
 
-test "platform audit chain verifies" {
+test "iothub audit chain verifies" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const dir = "zig-cache/platform-audit";
+    const dir = "zig-cache/iothub-audit";
     std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     var store = try Store.open(io, allocator, .{ .data_dir = dir });

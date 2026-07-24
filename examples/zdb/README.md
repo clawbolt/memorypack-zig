@@ -97,7 +97,7 @@ snapshot and WAL.
 The underlying Zig 0.16 `std.Io.Dir` API does not expose a portable directory
 fsync operation, so the implementation syncs the snapshot and WAL files but
 cannot promise directory-entry durability on every filesystem. This is the
-remaining platform limitation; deployments needing strict rename persistence
+remaining operating-system/filesystem limitation; deployments needing strict rename persistence
 should place the store on a filesystem with appropriate metadata guarantees.
 
 ### Configuration

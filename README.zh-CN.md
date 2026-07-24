@@ -393,6 +393,6 @@ MemoryPack WAL、崩溃安全快照、恢复、压缩、二级索引、分页、
 [`examples/audit/README.md`](examples/audit/README.md)。它提供基于 SHA-256
 哈希链的防篡改 MemoryPack 审计日志、完整性验证、分页和 TCP 服务。
 
-旗舰级完整系统示例见 [`platform/README.md`](platform/README.md)：这是一个
+旗舰级完整系统示例见 [`iothub/README.md`](iothub/README.md)：这是一个
 模块化纯 Zig IoT 遥测平台，组合持久化存储、至少一次投递消息代理、告警
 服务、审计证据以及带认证和限流的 MemoryPack 网关。
