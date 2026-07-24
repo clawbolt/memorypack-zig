@@ -130,6 +130,7 @@ pub const Result = struct {
     storage_visible_len: usize = 0,
     chunks_scanned: usize = 0,
     chunks_skipped: usize = 0,
+    late_materialized_bytes_saved: usize = 0,
 
     pub fn deinit(self: *Result) void {
         for (self.columns) |column| self.allocator.free(column.bytes);
@@ -391,6 +392,21 @@ pub fn execute(allocator: std.mem.Allocator, table: *storage.Table, query: Query
     var result = Result{ .allocator = allocator, .columns = try allocator.alloc(memorypack.Str, 0), .rows = try allocator.alloc(Row, 0) };
     errdefer result.deinit();
     result.columns = try buildResultColumns(allocator, schema, query);
+    var deferred_bytes_per_row: usize = 0;
+    for (schema, 0..) |column, index| {
+        var projected = false;
+        for (query.projection) |selected| {
+            if (selected == index) projected = true;
+        }
+        if (!projected) deferred_bytes_per_row += columnStorageWidth(column.kind);
+    }
+    if (query.threads > 1 and query.predicates.len == 0 and query.group_by == null and
+        query.group_by_columns.len == 0 and query.aggregates.len == 1 and
+        query.aggregates[0].kind == .sum and query.aggregates[0].column != null and
+        schema[query.aggregates[0].column.?].kind == .f64)
+    {
+        return executeParallelSum(allocator, table, query, &result);
+    }
     var rows: std.ArrayList(Row) = .empty;
     errdefer freeRows(allocator, rows.items);
     var groups: std.ArrayList(Group) = .empty;
@@ -433,7 +449,11 @@ pub fn execute(allocator: std.mem.Allocator, table: *storage.Table, query: Query
             }
         }
         if (query.aggregates.len == 0 and query.group_by == null and query.group_by_columns.len == 0) {
-            for (selected, 0..) |keep, row| if (keep) try rows.append(allocator, try projectChunkRow(allocator, chunk, query.projection, row));
+            for (selected, 0..) |keep, row| {
+                if (!keep) continue;
+                result.late_materialized_bytes_saved += deferred_bytes_per_row;
+                try rows.append(allocator, try projectChunkRow(allocator, chunk, query.projection, row));
+            }
         } else if (query.group_by_columns.len > 0 or query.group_by != null) {
             const group_columns = if (query.group_by_columns.len > 0) query.group_by_columns else &[_]usize{query.group_by.?};
             for (selected, 0..) |keep, row| {
@@ -499,6 +519,35 @@ pub fn execute(allocator: std.mem.Allocator, table: *storage.Table, query: Query
         result.storage_visible_len = limit;
     };
     return result;
+}
+
+fn columnStorageWidth(kind: storage.ColumnType) usize {
+    return switch (kind) {
+        .i64, .f64 => 8,
+        .bool => 1,
+        .string => 4,
+    };
+}
+
+fn executeParallelSum(allocator: std.mem.Allocator, table: *storage.Table, query: Query, result: *Result) !Result {
+    var values: std.ArrayList(f64) = .empty;
+    defer values.deinit(allocator);
+    const column = query.aggregates[0].column.?;
+    const stats = try table.stats();
+    for (0..stats.chunks) |chunk_id| {
+        var chunk = try table.readChunk(@intCast(chunk_id));
+        defer storage.freeChunk(allocator, &chunk);
+        if (chunk.columns[column] != .f64) return error.InvalidChunk;
+        for (chunk.columns[column].f64, 0..) |value, row| if (valid(chunk, column, row)) try values.append(allocator, value);
+    }
+    const total = try parallelSumF64(allocator, values.items, query.threads);
+    const row = try allocator.alloc(Value, 1);
+    row[0] = .{ .f64 = total };
+    result.rows = try allocator.alloc(Row, 1);
+    result.rows[0] = row;
+    result.storage_rows = result.rows;
+    result.storage_visible_len = 1;
+    return result.*;
 }
 
 fn canSkipChunk(meta: storage.ChunkMeta, schema: []const storage.ColumnSchema, predicates: []const Predicate) bool {

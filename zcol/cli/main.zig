@@ -80,6 +80,12 @@ fn query(init: std.process.Init, allocator: std.mem.Allocator, args: *std.proces
     const dir = args.next() orelse return error.InvalidInput;
     const text = args.next() orelse return error.InvalidInput;
     if (std.mem.indexOf(u8, text, "OVER") != null) return windowQuery(init, allocator, dir, text);
+    var requested_threads: usize = 1;
+    if (args.next()) |option| {
+        if (!std.mem.eql(u8, option, "--threads")) return error.InvalidInput;
+        requested_threads = std.fmt.parseInt(usize, args.next() orelse return error.InvalidInput, 10) catch return error.InvalidInput;
+        if (requested_threads == 0) return error.InvalidInput;
+    }
     var table = try storage.Table.open(init.io, allocator, dir);
     defer table.deinit();
     var plan = try sql.parse(allocator, text);
@@ -88,6 +94,7 @@ fn query(init: std.process.Init, allocator: std.mem.Allocator, args: *std.proces
     const schema = try table.getSchema();
     var physical = try sql.bind(allocator, &plan, schema);
     defer sql.freeQuery(allocator, &physical);
+    physical.threads = requested_threads;
     var result = try exec.execute(allocator, &table, physical);
     defer result.deinit();
     for (result.columns) |column| std.debug.print("{s}\t", .{column.bytes});
@@ -101,6 +108,7 @@ fn query(init: std.process.Init, allocator: std.mem.Allocator, args: *std.proces
     }
     std.debug.print("rows={d}\n", .{result.rows.len});
     std.debug.print("chunks_scanned={d} chunks_skipped={d}\n", .{ result.chunks_scanned, result.chunks_skipped });
+    std.debug.print("late_materialized_bytes_saved={d}\n", .{result.late_materialized_bytes_saved});
 }
 
 fn windowQuery(init: std.process.Init, allocator: std.mem.Allocator, dir: []const u8, text: []const u8) !void {
@@ -120,7 +128,7 @@ fn windowQuery(init: std.process.Init, allocator: std.mem.Allocator, dir: []cons
         functions[index] = function.kind;
         if (function.value_column) |column| value_column = findSchemaColumn(schema, column.bytes) orelse return error.ColumnNotFound;
     }
-    var result = try exec.executeWindow(allocator, &table, .{ .partition_by = partitions, .order_by = order, .value_column = value_column, .functions = functions });
+    var result = try exec.executeWindow(allocator, &table, .{ .partition_by = partitions, .order_by = order, .order_desc = plan.order_desc, .value_column = value_column, .functions = functions });
     defer result.deinit();
     for (result.columns) |column| std.debug.print("{s}\t", .{column.bytes});
     std.debug.print("\n", .{});
@@ -143,6 +151,12 @@ fn joinQuery(init: std.process.Init, allocator: std.mem.Allocator, left_dir: []c
     const right_schema = try right.getSchema();
     const left_key = try resolveQualified(left_schema, right_schema, plan.join_left.?.bytes);
     const right_key = try resolveQualified(right_schema, left_schema, plan.join_right.?.bytes);
+    var left_keys = try allocator.alloc(usize, plan.join_left_keys.len);
+    defer allocator.free(left_keys);
+    var right_keys = try allocator.alloc(usize, plan.join_right_keys.len);
+    defer allocator.free(right_keys);
+    for (plan.join_left_keys, 0..) |key, index| left_keys[index] = try resolveQualified(left_schema, right_schema, key.bytes);
+    for (plan.join_right_keys, 0..) |key, index| right_keys[index] = try resolveQualified(right_schema, left_schema, key.bytes);
     var projections = try allocator.alloc(exec.JoinProjection, plan.select.len);
     defer allocator.free(projections);
     for (plan.select, 0..) |item, index| {
@@ -155,7 +169,7 @@ fn joinQuery(init: std.process.Init, allocator: std.mem.Allocator, left_dir: []c
         projections[index] = .{ .left = !is_right, .column = column_index, .name = .{ .bytes = column.bytes } };
     }
     const order = if (plan.order_by) |order_column| findProjection(projections, order_column.bytes) else null;
-    var result = try exec.executeJoin(allocator, &left, &right, .{ .left_key = left_key, .right_key = right_key, .projection = projections, .kind = plan.join_kind, .order_by = order, .order_desc = plan.order_desc, .limit = plan.limit });
+    var result = try exec.executeJoin(allocator, &left, &right, .{ .left_key = left_key, .right_key = right_key, .left_keys = left_keys, .right_keys = right_keys, .projection = projections, .kind = plan.join_kind, .order_by = order, .order_desc = plan.order_desc, .limit = plan.limit });
     defer result.deinit();
     for (result.columns) |column| std.debug.print("{s}\t", .{column.bytes});
     std.debug.print("\n", .{});

@@ -67,7 +67,10 @@ pub const Plan = struct {
     join_table: ?memorypack.Str = null,
     join_left: ?memorypack.Str = null,
     join_right: ?memorypack.Str = null,
+    join_left_keys: []memorypack.Str = &.{},
+    join_right_keys: []memorypack.Str = &.{},
     join_kind: exec.JoinKind = .inner,
+    threads: usize = 1,
 
     pub fn deinit(self: *Plan) void {
         self.allocator.free(self.table.bytes);
@@ -90,6 +93,10 @@ pub const Plan = struct {
         if (self.join_table) |join| self.allocator.free(join.bytes);
         if (self.join_left) |join| self.allocator.free(join.bytes);
         if (self.join_right) |join| self.allocator.free(join.bytes);
+        for (self.join_left_keys) |key| self.allocator.free(key.bytes);
+        self.allocator.free(self.join_left_keys);
+        for (self.join_right_keys) |key| self.allocator.free(key.bytes);
+        self.allocator.free(self.join_right_keys);
     }
 };
 
@@ -104,7 +111,14 @@ pub fn parseWindow(allocator: std.mem.Allocator, text: []const u8) ParseError!Wi
     const partition_text = over_text[partition_marker + 13 .. order_marker];
     const order_text = over_text[order_marker + 10 ..];
     const close = std.mem.indexOfScalar(u8, order_text, ')') orelse order_text.len;
-    const order_name = std.mem.trim(u8, order_text[0..close], " ()");
+    var order_name = std.mem.trim(u8, order_text[0..close], " ()");
+    var order_desc = false;
+    if (std.ascii.endsWithIgnoreCase(order_name, " DESC")) {
+        order_desc = true;
+        order_name = std.mem.trim(u8, order_name[0 .. order_name.len - 5], " ");
+    } else if (std.ascii.endsWithIgnoreCase(order_name, " ASC")) {
+        order_name = std.mem.trim(u8, order_name[0 .. order_name.len - 4], " ");
+    }
     var projection: std.ArrayList(memorypack.Str) = .empty;
     var partition: std.ArrayList(memorypack.Str) = .empty;
     var functions: std.ArrayList(WindowFunction) = .empty;
@@ -143,7 +157,7 @@ pub fn parseWindow(allocator: std.mem.Allocator, text: []const u8) ParseError!Wi
         .projection = try projection.toOwnedSlice(allocator),
         .partition_by = try partition.toOwnedSlice(allocator),
         .order_by = .{ .bytes = try allocator.dupe(u8, order_name) },
-        .order_desc = false,
+        .order_desc = order_desc,
         .functions = try functions.toOwnedSlice(allocator),
     };
 }
@@ -247,6 +261,7 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) ParseError!Plan {
         .order_by = order_by,
         .order_desc = order_desc,
         .limit = limit,
+        .threads = 1,
     };
 }
 
@@ -275,13 +290,32 @@ fn parseJoin(allocator: std.mem.Allocator, text: []const u8) ParseError!Plan {
     } else if (!std.ascii.eqlIgnoreCase(join_keyword, "JOIN")) return error.TrailingTokens;
     const join_table = tokens.next() orelse return error.MissingTable;
     if (!std.ascii.eqlIgnoreCase(tokens.next() orelse return error.TrailingTokens, "ON")) return error.TrailingTokens;
-    const join_left = tokens.next() orelse return error.InvalidPredicate;
-    if (!std.mem.eql(u8, tokens.next() orelse return error.InvalidOperator, "=")) return error.InvalidOperator;
-    const join_right = tokens.next() orelse return error.InvalidPredicate;
+    var left_keys: std.ArrayList(memorypack.Str) = .empty;
+    var right_keys: std.ArrayList(memorypack.Str) = .empty;
+    errdefer {
+        for (left_keys.items) |key| allocator.free(key.bytes);
+        left_keys.deinit(allocator);
+        for (right_keys.items) |key| allocator.free(key.bytes);
+        right_keys.deinit(allocator);
+    }
+    var trailing_keyword: ?[]const u8 = null;
+    while (true) {
+        const join_left = tokens.next() orelse return error.InvalidPredicate;
+        if (!std.mem.eql(u8, tokens.next() orelse return error.InvalidOperator, "=")) return error.InvalidOperator;
+        const join_right = tokens.next() orelse return error.InvalidPredicate;
+        try left_keys.append(allocator, .{ .bytes = try allocator.dupe(u8, join_left) });
+        try right_keys.append(allocator, .{ .bytes = try allocator.dupe(u8, join_right) });
+        const separator = tokens.next() orelse break;
+        if (!std.ascii.eqlIgnoreCase(separator, "AND")) {
+            trailing_keyword = separator;
+            break;
+        }
+    }
     var order_by: ?memorypack.Str = null;
     var order_desc = false;
     var limit: ?usize = null;
-    if (tokens.next()) |keyword| {
+    const next_clause = trailing_keyword orelse tokens.next();
+    if (next_clause) |keyword| {
         if (!std.ascii.eqlIgnoreCase(keyword, "ORDER")) return error.TrailingTokens;
         if (!std.ascii.eqlIgnoreCase(tokens.next() orelse return error.TrailingTokens, "BY")) return error.TrailingTokens;
         order_by = .{ .bytes = try allocator.dupe(u8, stripComma(tokens.next() orelse return error.TrailingTokens)) };
@@ -304,9 +338,12 @@ fn parseJoin(allocator: std.mem.Allocator, text: []const u8) ParseError!Plan {
         .order_desc = order_desc,
         .limit = limit,
         .join_table = .{ .bytes = try allocator.dupe(u8, join_table) },
-        .join_left = .{ .bytes = try allocator.dupe(u8, join_left) },
-        .join_right = .{ .bytes = try allocator.dupe(u8, join_right) },
+        .join_left = .{ .bytes = try allocator.dupe(u8, left_keys.items[0].bytes) },
+        .join_right = .{ .bytes = try allocator.dupe(u8, right_keys.items[0].bytes) },
+        .join_left_keys = try left_keys.toOwnedSlice(allocator),
+        .join_right_keys = try right_keys.toOwnedSlice(allocator),
         .join_kind = join_kind,
+        .threads = 1,
     };
 }
 
@@ -342,6 +379,7 @@ pub fn bind(allocator: std.mem.Allocator, plan: *const Plan, schema: []const sto
         .order_by = order_by,
         .order_desc = plan.order_desc,
         .limit = plan.limit,
+        .threads = plan.threads,
     };
 }
 
