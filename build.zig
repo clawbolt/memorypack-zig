@@ -337,4 +337,21 @@ pub fn build(b: *std.Build) void {
     const iothub_e2e = b.addSystemCommand(&.{ "sh", "iothub/e2e/run.sh" });
     if (b.args) |args| iothub_e2e.addArgs(args);
     b.step("iothub-e2e", "Run the IoT Hub end-to-end flow").dependOn(&iothub_e2e.step);
+
+    const zcol_storage = b.addModule("zcol-storage", .{
+        .root_source_file = b.path("zcol/storage/storage.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "memorypack", .module = module }},
+    });
+    const zcol_storage_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zcol/storage/storage.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "memorypack", .module = module }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(zcol_storage_tests).step);
+    _ = zcol_storage;
 }
