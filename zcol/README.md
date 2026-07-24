@@ -86,13 +86,16 @@ Representative ReleaseFast output from this repository:
 
 ```text
 benchmark rows=100000
-  columnar: median_ns=160355 rows_per_sec=623616351 bytes_scanned=900000 sum=9375000.00
-  row:      median_ns=669623 rows_per_sec=149337761 bytes_scanned=8800000 sum=9375000.00
+  filter+sum columnar: median_ns=165626 rows_per_sec=603769939 bytes_scanned=900000 sum=9375000.00
+  filter+sum row:      median_ns=700888 rows_per_sec=142676147 bytes_scanned=8800000 sum=9375000.00
+  group-by   columnar: median_ns=136957 rows_per_sec=730156180 bytes_scanned=900000 sum=49950000.00
+  group-by   row:      median_ns=659860 rows_per_sec=151547297 bytes_scanned=8800000 sum=49950000.00
 ```
 
-This run measured a 4.18x columnar latency advantage and 9.8x fewer bytes
-scanned. Results vary with CPU, Zig version, and process load; the benchmark
-does not claim that columnar wins point lookups or every workload.
+These runs measured 4.23x and 4.82x columnar latency advantages for filter+sum
+and group-by respectively, with 9.8x fewer bytes scanned. Results vary with
+CPU, Zig version, and process load; the benchmark does not claim that columnar
+wins point lookups or every workload.
 
 ## CLI and demo
 
