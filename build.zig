@@ -353,5 +353,26 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(zcol_storage_tests).step);
-    _ = zcol_storage;
+    const zcol_exec = b.addModule("zcol-exec", .{
+        .root_source_file = b.path("zcol/exec/exec.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "memorypack", .module = module },
+            .{ .name = "storage", .module = zcol_storage },
+        },
+    });
+    const zcol_exec_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zcol/exec/exec.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "memorypack", .module = module },
+                .{ .name = "storage", .module = zcol_storage },
+            },
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(zcol_exec_tests).step);
+    _ = zcol_exec;
 }
