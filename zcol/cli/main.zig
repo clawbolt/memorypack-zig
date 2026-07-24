@@ -277,3 +277,10 @@ fn freeColumns(allocator: std.mem.Allocator, columns: []storage.Column) void {
         .string => |values| allocator.free(values),
     };
 }
+
+test "cli parses a typed schema" {
+    const schema = try parseSchema(std.testing.allocator, "id:i64,active:bool,team:string");
+    defer freeSchema(std.testing.allocator, schema);
+    try std.testing.expectEqual(@as(usize, 3), schema.len);
+    try std.testing.expectEqual(storage.ColumnType.bool, schema[1].kind);
+}

@@ -430,4 +430,19 @@ pub fn build(b: *std.Build) void {
     const run_zcol = b.addRunArtifact(zcol_cli);
     if (b.args) |args| run_zcol.addArgs(args);
     b.step("zcol", "Run the zcol columnar analytics engine").dependOn(&run_zcol.step);
+    const zcol_cli_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zcol/cli/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "memorypack", .module = module },
+                .{ .name = "storage", .module = zcol_storage },
+                .{ .name = "exec", .module = zcol_exec },
+                .{ .name = "sql", .module = zcol_sql },
+                .{ .name = "bench", .module = zcol_bench },
+            },
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(zcol_cli_tests).step);
 }
