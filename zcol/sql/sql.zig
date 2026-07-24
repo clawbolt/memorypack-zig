@@ -496,3 +496,21 @@ test "sql parser accepts null checks and ordering" {
     try std.testing.expect(plan.order_desc);
     try std.testing.expectEqual(@as(usize, 2), plan.limit.?);
 }
+
+test "sql parser plans composite outer joins" {
+    var plan = try parse(std.testing.allocator, "SELECT a.id, b.label FROM sales FULL JOIN lookup ON a.id = b.id AND a.team = b.team ORDER BY b.label DESC LIMIT 3");
+    defer plan.deinit();
+    try std.testing.expectEqual(exec.JoinKind.full, plan.join_kind);
+    try std.testing.expectEqual(@as(usize, 2), plan.join_left_keys.len);
+    try std.testing.expectEqualStrings("a.team", plan.join_left_keys[1].bytes);
+    try std.testing.expect(plan.order_desc);
+}
+
+test "window parser accepts descending multi-column partitions" {
+    var plan = try parseWindow(std.testing.allocator, "SELECT team, amount, ROW_NUMBER() OVER (PARTITION BY team, active ORDER BY amount DESC), SUM(amount) OVER (PARTITION BY team, active ORDER BY amount DESC) FROM sales");
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 2), plan.partition_by.len);
+    try std.testing.expect(plan.order_desc);
+    try std.testing.expectEqual(exec.WindowKind.row_number, plan.functions[0].kind);
+    try std.testing.expectEqual(exec.WindowKind.running_sum, plan.functions[1].kind);
+}

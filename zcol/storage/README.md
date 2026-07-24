@@ -6,4 +6,6 @@ written before the atomically replaced manifest, so a completed append is
 discoverable after reopening. Each column has a packed validity bitmap.
 Strings use per-chunk dictionaries and `u32` code arrays, then decode
 transparently for callers. Chunk metadata includes version-tolerant zone maps
-with min/max values and null counts for predicate pushdown.
+with min/max values and null counts for predicate pushdown. The current
+MemoryPack reader decodes a complete chunk object; projection late materializes
+the selected output values after filtering.

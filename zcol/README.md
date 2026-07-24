@@ -51,14 +51,16 @@ and evaluates each predicate over the relevant typed slice. Projection copies
 only selected values. Aggregates maintain typed-independent numeric state for
 `count`, `sum`, `min`, `max`, and `avg`; grouping uses composite hash keys,
 including null components and dictionary codes. Composite-key inner and
-left/right/full outer joins, one-key `ORDER BY`, `LIMIT`, and window ranking
-with running aggregates are available.
+left/right/full outer joins are available through SQL, including mixed-type
+keys. Window ranking and running aggregates support multiple partition columns
+and ascending or descending order.
 
 Every chunk persists zone maps (textual min/max plus null count) in its
 version-tolerant manifest metadata. Selective numeric predicates skip
-impossible chunks and report scan/skip counts. The executor also exposes a
-deterministic threaded numeric reduction; inputs below a few thousand values
-fall back to scalar execution.
+impossible chunks and report scan/skip counts. Projection gathering is delayed
+until after filtering and reports the bytes of non-projected values avoided.
+Large ungrouped `SUM(f64)` plans can use deterministic threaded reduction;
+small inputs remain serial.
 
 ## SQL subset
 
@@ -117,10 +119,10 @@ benchmark rows=100000
   null-sum scalar:     median_ns=43342 sum=42814715.00
   null-sum SIMD:       median_ns=36222 sum=42814715.00
   join probe:          median_ns=213057 checksum=100000
-  outer join:          median_ns=...
-  window:              median_ns=...
-  parallel sum serial: median_ns=...
-  parallel sum:        median_ns=...
+  outer join:          median_ns=474476
+  window:              median_ns=201171
+  parallel sum serial: median_ns=200068
+  parallel sum:        median_ns=464366
   zone-map chunks skipped=1
 ```
 
@@ -147,8 +149,11 @@ benchmark with assertions on known answers.
 
 - Joins are equi-joins; window frames are limited to running partition-start
   frames and there are no subqueries or distributed execution.
-- Threaded reduction is currently exposed as a numeric reduction primitive;
-  general grouped plans remain deterministic serial scans.
+- Threaded query execution currently applies to ungrouped floating-point SUM
+  plans. Grouped and filtered aggregate plans remain serial unless they match
+  that specialized path.
+- Late materialization avoids gathering non-projected values after selection;
+  chunk files are still decoded as complete MemoryPack objects.
 - No transactions or concurrent writer protocol.
 - One `ORDER BY` key and numeric aggregates.
 - The benchmark is an executable microbenchmark, not a full query optimizer or
