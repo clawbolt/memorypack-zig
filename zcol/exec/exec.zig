@@ -38,13 +38,25 @@ pub const JoinProjection = struct {
     column: usize,
     name: memorypack.Str,
 };
+pub const JoinKind = enum { inner, left, right, full };
 pub const JoinQuery = struct {
     left_key: usize,
     right_key: usize,
     projection: []const JoinProjection,
+    left_keys: []const usize = &.{},
+    right_keys: []const usize = &.{},
+    kind: JoinKind = .inner,
     order_by: ?usize = null,
     order_desc: bool = false,
     limit: ?usize = null,
+};
+pub const WindowKind = enum { row_number, rank, dense_rank, running_sum, running_avg, running_count };
+pub const WindowQuery = struct {
+    partition_by: []const usize,
+    order_by: usize,
+    order_desc: bool = false,
+    value_column: ?usize = null,
+    functions: []const WindowKind,
 };
 pub fn scalarSumF64(values: []const f64) f64 {
     var total: f64 = 0;
@@ -112,12 +124,19 @@ pub fn executeJoin(allocator: std.mem.Allocator, left: *storage.Table, right: *s
         freeRowValues(allocator, left_rows.items);
         left_rows.deinit(allocator);
     }
-    var map = std.StringHashMap(usize).init(allocator);
+    var map = std.StringHashMap(std.ArrayList(usize)).init(allocator);
     defer {
         var iterator = map.iterator();
-        while (iterator.next()) |entry| allocator.free(entry.key_ptr.*);
+        while (iterator.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
         map.deinit();
     }
+    const left_keys = if (query.left_keys.len > 0) query.left_keys else &[_]usize{query.left_key};
+    const right_keys = if (query.right_keys.len > 0) query.right_keys else &[_]usize{query.right_key};
+    var left_matched = try allocator.alloc(bool, 0);
+    defer allocator.free(left_matched);
     const left_chunks = try left.stats();
     var chunk_id: u32 = 0;
     while (chunk_id < left_chunks.chunks) : (chunk_id += 1) {
@@ -129,9 +148,18 @@ pub fn executeJoin(allocator: std.mem.Allocator, left: *storage.Table, right: *s
             for (chunk.columns, 0..) |_, column_index| values[column_index] = try columnValueAt(allocator, chunk, column_index, row);
             const index = left_rows.items.len;
             try left_rows.append(allocator, values);
-            const key = try valueKey(allocator, values[query.left_key]);
-            try map.put(try allocator.dupe(u8, key), index);
-            allocator.free(key);
+            left_matched = try allocator.realloc(left_matched, left_rows.items.len);
+            left_matched[index] = false;
+            if (try joinKey(allocator, values, left_keys)) |key| {
+                if (map.getPtr(key)) |indices| {
+                    allocator.free(key);
+                    try indices.append(allocator, index);
+                } else {
+                    var indices: std.ArrayList(usize) = .empty;
+                    try indices.append(allocator, index);
+                    try map.put(key, indices);
+                }
+            }
         }
     }
     const right_chunks = try right.stats();
@@ -146,15 +174,31 @@ pub fn executeJoin(allocator: std.mem.Allocator, left: *storage.Table, right: *s
         defer storage.freeChunk(allocator, &chunk);
         const rows = columnLength(chunk.columns[0]);
         for (0..rows) |row| {
-            const key_value = try columnValueAt(allocator, chunk, query.right_key, row);
-            const key = try valueKey(allocator, key_value);
-            freeValue(allocator, key_value);
-            defer allocator.free(key);
-            const left_index = map.get(key) orelse continue;
-            const output = try allocator.alloc(Value, query.projection.len);
-            errdefer allocator.free(output);
-            for (query.projection, 0..) |projection, index| output[index] = if (projection.left) try cloneValue(allocator, left_rows.items[left_index][projection.column]) else try columnValueAt(allocator, chunk, projection.column, row);
-            try output_rows.append(allocator, output);
+            var right_values = try allocator.alloc(Value, chunk.columns.len);
+            defer {
+                for (right_values) |value| freeValue(allocator, value);
+                allocator.free(right_values);
+            }
+            for (chunk.columns, 0..) |_, column_index| right_values[column_index] = try columnValueAt(allocator, chunk, column_index, row);
+            const maybe_key = try joinKey(allocator, right_values, right_keys);
+            if (maybe_key) |key| {
+                defer allocator.free(key);
+                if (map.get(key)) |indices| {
+                    for (indices.items) |left_index| {
+                        left_matched[left_index] = true;
+                        try appendJoinRow(allocator, &output_rows, query.projection, left_rows.items[left_index], right_values);
+                    }
+                } else if (query.kind == .right or query.kind == .full) {
+                    try appendJoinRow(allocator, &output_rows, query.projection, null, right_values);
+                }
+            } else if (query.kind == .right or query.kind == .full) {
+                try appendJoinRow(allocator, &output_rows, query.projection, null, right_values);
+            }
+        }
+    }
+    if (query.kind == .left or query.kind == .full) {
+        for (left_rows.items, 0..) |left_values, left_index| {
+            if (!left_matched[left_index]) try appendJoinRow(allocator, &output_rows, query.projection, left_values, null);
         }
     }
     result.rows = try output_rows.toOwnedSlice(allocator);
@@ -175,6 +219,130 @@ pub fn executeJoin(allocator: std.mem.Allocator, left: *storage.Table, right: *s
         result.storage_visible_len = limit;
     };
     return result;
+}
+
+fn joinKey(allocator: std.mem.Allocator, values: []const Value, keys: []const usize) !?[]u8 {
+    for (keys) |column| if (values[column] == .null) return null;
+    var selected = try allocator.alloc(Value, keys.len);
+    defer allocator.free(selected);
+    for (keys, 0..) |column, index| selected[index] = values[column];
+    return try valuesKey(allocator, selected);
+}
+
+fn appendJoinRow(
+    allocator: std.mem.Allocator,
+    rows: *std.ArrayList(Row),
+    projection: []const JoinProjection,
+    left: ?[]const Value,
+    right: ?[]const Value,
+) !void {
+    const output = try allocator.alloc(Value, projection.len);
+    errdefer allocator.free(output);
+    for (projection, 0..) |item, index| {
+        const source = if (item.left) left else right;
+        output[index] = if (source) |values| try cloneValue(allocator, values[item.column]) else .{ .null = {} };
+    }
+    try rows.append(allocator, output);
+}
+
+pub fn executeWindow(allocator: std.mem.Allocator, table: *storage.Table, query: WindowQuery) !Result {
+    const schema = try table.getSchema();
+    var source: std.ArrayList(Row) = .empty;
+    defer {
+        freeRowValues(allocator, source.items);
+        source.deinit(allocator);
+    }
+    const stats = try table.stats();
+    var chunk_id: u32 = 0;
+    while (chunk_id < stats.chunks) : (chunk_id += 1) {
+        var chunk = try table.readChunk(chunk_id);
+        defer storage.freeChunk(allocator, &chunk);
+        const row_count = columnLength(chunk.columns[0]);
+        for (0..row_count) |row| {
+            const values = try allocator.alloc(Value, chunk.columns.len);
+            errdefer allocator.free(values);
+            for (chunk.columns, 0..) |_, column| values[column] = try columnValueAt(allocator, chunk, column, row);
+            try source.append(allocator, values);
+        }
+    }
+    var order: std.ArrayList(usize) = .empty;
+    defer order.deinit(allocator);
+    try order.ensureTotalCapacity(allocator, source.items.len);
+    for (source.items, 0..) |_, index| try order.append(allocator, index);
+    const context = WindowSortContext{ .rows = source.items, .partition_by = query.partition_by, .order_by = query.order_by, .descending = query.order_desc };
+    std.mem.sort(usize, order.items, context, lessWindowRows);
+    var result = Result{ .allocator = allocator, .columns = try allocator.alloc(memorypack.Str, schema.len + query.functions.len), .rows = try allocator.alloc(Row, 0) };
+    errdefer result.deinit();
+    for (schema, 0..) |column, index| result.columns[index] = .{ .bytes = try allocator.dupe(u8, column.name.bytes) };
+    const names = [_][]const u8{ "row_number", "rank", "dense_rank", "running_sum", "running_avg", "running_count" };
+    for (query.functions, 0..) |function, index| result.columns[schema.len + index] = .{ .bytes = try allocator.dupe(u8, names[@intFromEnum(function)]) };
+    var output: std.ArrayList(Row) = .empty;
+    errdefer freeRowValues(allocator, output.items);
+    var partition_start: usize = 0;
+    while (partition_start < order.items.len) {
+        var partition_end = partition_start + 1;
+        while (partition_end < order.items.len and samePartition(source.items[order.items[partition_start]], source.items[order.items[partition_end]], query.partition_by)) : (partition_end += 1) {}
+        var rank: usize = 1;
+        var dense_rank: usize = 1;
+        var previous_order: ?Value = null;
+        var sum: f64 = 0;
+        var count: usize = 0;
+        for (order.items[partition_start..partition_end], 0..) |row_index, offset| {
+            const row = try allocator.alloc(Value, result.columns.len);
+            errdefer allocator.free(row);
+            for (source.items[row_index], 0..) |value, column| row[column] = try cloneValue(allocator, value);
+            if (previous_order) |previous| {
+                if (compareValue(previous, source.items[row_index][query.order_by]) != 0) {
+                    rank = offset + 1;
+                    dense_rank += 1;
+                }
+            }
+            freeValue(allocator, previous_order orelse .{ .null = {} });
+            previous_order = try cloneValue(allocator, source.items[row_index][query.order_by]);
+            if (query.value_column) |column| if (source.items[row_index][column] != .null) {
+                count += 1;
+                sum += numericValue(source.items[row_index][column]);
+            };
+            for (query.functions, 0..) |function, function_index| row[schema.len + function_index] = switch (function) {
+                .row_number => .{ .i64 = @intCast(offset + 1) },
+                .rank => .{ .i64 = @intCast(rank) },
+                .dense_rank => .{ .i64 = @intCast(dense_rank) },
+                .running_sum => .{ .f64 = sum },
+                .running_avg => if (count == 0) .{ .null = {} } else .{ .f64 = sum / @as(f64, @floatFromInt(count)) },
+                .running_count => .{ .i64 = @intCast(count) },
+            };
+            try output.append(allocator, row);
+        }
+        if (previous_order) |previous| freeValue(allocator, previous);
+        partition_start = partition_end;
+    }
+    result.rows = try output.toOwnedSlice(allocator);
+    result.storage_rows = result.rows;
+    result.storage_visible_len = result.rows.len;
+    return result;
+}
+
+const WindowSortContext = struct { rows: []const Row, partition_by: []const usize, order_by: usize, descending: bool };
+fn lessWindowRows(context: WindowSortContext, left: usize, right: usize) bool {
+    const left_row = context.rows[left];
+    const right_row = context.rows[right];
+    for (context.partition_by) |column| {
+        const compared = compareValue(left_row[column], right_row[column]);
+        if (compared != 0) return compared < 0;
+    }
+    const compared = compareValue(left_row[context.order_by], right_row[context.order_by]);
+    return if (context.descending) compared > 0 else compared < 0;
+}
+fn samePartition(left: Row, right: Row, columns: []const usize) bool {
+    for (columns) |column| if (compareValue(left[column], right[column]) != 0) return false;
+    return true;
+}
+fn numericValue(value: Value) f64 {
+    return switch (value) {
+        .i64 => |number| @floatFromInt(number),
+        .f64 => |number| number,
+        else => 0,
+    };
 }
 
 const Group = struct {
@@ -581,6 +749,43 @@ test "single-key inner join orders and limits results" {
     try std.testing.expectEqual(@as(f64, 20), result.rows[0][1].f64);
 }
 
+test "composite and outer joins preserve unmatched rows" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const left_dir = "zig-cache/zcol-join-outer-left";
+    const right_dir = "zig-cache/zcol-join-outer-right";
+    std.Io.Dir.cwd().deleteTree(io, left_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(io, right_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, left_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, right_dir) catch {};
+    const schema = [_]storage.ColumnSchema{ .{ .name = .{ .bytes = "k" }, .kind = .i64 }, .{ .name = .{ .bytes = "tag" }, .kind = .string } };
+    var left = try storage.Table.create(io, allocator, left_dir, &schema, 8);
+    defer left.deinit();
+    var right = try storage.Table.create(io, allocator, right_dir, &schema, 8);
+    defer right.deinit();
+    const left_tags = [_]memorypack.Str{ .{ .bytes = "a" }, .{ .bytes = "b" }, .{ .bytes = "c" } };
+    const right_tags = [_]memorypack.Str{ .{ .bytes = "a" }, .{ .bytes = "x" }, .{ .bytes = "c" } };
+    _ = try left.appendChunk(&.{ .{ .i64 = &.{ 1, 2, 3 } }, .{ .string = &left_tags } });
+    _ = try right.appendChunk(&.{ .{ .i64 = &.{ 1, 2, 4 } }, .{ .string = &right_tags } });
+    const keys = [_]usize{ 0, 1 };
+    const projections = [_]JoinProjection{
+        .{ .left = true, .column = 0, .name = .{ .bytes = "left_k" } },
+        .{ .left = false, .column = 0, .name = .{ .bytes = "right_k" } },
+    };
+    inline for ([_]JoinKind{ .left, .right, .full }) |kind| {
+        var result = try executeJoin(allocator, &left, &right, .{ .left_key = 0, .right_key = 0, .left_keys = &keys, .right_keys = &keys, .kind = kind, .projection = &projections });
+        defer result.deinit();
+        const expected = switch (kind) {
+            .left, .right => 3,
+            .full => 5,
+            .inner => 1,
+        };
+        try std.testing.expectEqual(@as(usize, expected), result.rows.len);
+        if (kind == .left) try std.testing.expect(result.rows[2][1] == .null);
+        if (kind == .right) try std.testing.expect(result.rows[2][0] == .null);
+    }
+}
+
 test "composite grouping separates mixed keys" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -603,4 +808,38 @@ test "composite grouping separates mixed keys" {
     try std.testing.expectEqual(@as(usize, 3), result.rows.len);
     try std.testing.expectEqual(@as(f64, 6), result.rows[0][2].f64);
     try std.testing.expectEqual(@as(f64, 3), result.rows[1][2].f64);
+}
+
+test "window ranking and running sums respect partitions and ties" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const dir = "zig-cache/zcol-window";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const schema = [_]storage.ColumnSchema{
+        .{ .name = .{ .bytes = "team" }, .kind = .string },
+        .{ .name = .{ .bytes = "score" }, .kind = .i64 },
+        .{ .name = .{ .bytes = "amount" }, .kind = .f64 },
+    };
+    var table = try storage.Table.create(io, allocator, dir, &schema, 8);
+    defer table.deinit();
+    const teams = [_]memorypack.Str{ .{ .bytes = "a" }, .{ .bytes = "a" }, .{ .bytes = "a" }, .{ .bytes = "b" } };
+    _ = try table.appendChunk(&.{ .{ .string = &teams }, .{ .i64 = &.{ 2, 1, 1, 3 } }, .{ .f64 = &.{ 20, 10, 5, 7 } } });
+    const functions = [_]WindowKind{ .row_number, .rank, .dense_rank, .running_sum, .running_count };
+    const partitions = [_]usize{0};
+    var result = try executeWindow(allocator, &table, .{ .partition_by = &partitions, .order_by = 1, .value_column = 2, .functions = &functions });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 4), result.rows.len);
+    try std.testing.expectEqual(@as(i64, 1), result.rows[0][3].i64);
+    try std.testing.expectEqual(@as(i64, 1), result.rows[0][4].i64);
+    try std.testing.expectEqual(@as(i64, 1), result.rows[0][5].i64);
+    try std.testing.expect(result.rows[0][6].f64 == 5 or result.rows[0][6].f64 == 10);
+    try std.testing.expectEqual(@as(i64, 2), result.rows[1][3].i64);
+    try std.testing.expectEqual(@as(i64, 1), result.rows[1][4].i64);
+    try std.testing.expectEqual(@as(i64, 1), result.rows[1][5].i64);
+    try std.testing.expectEqual(@as(f64, 15), result.rows[1][6].f64);
+    try std.testing.expectEqual(@as(i64, 3), result.rows[2][3].i64);
+    try std.testing.expectEqual(@as(i64, 3), result.rows[2][4].i64);
+    try std.testing.expectEqual(@as(i64, 2), result.rows[2][5].i64);
+    try std.testing.expectEqual(@as(f64, 35), result.rows[2][6].f64);
 }
