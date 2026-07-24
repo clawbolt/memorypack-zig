@@ -3,5 +3,6 @@
 Durable MemoryPack-backed columnar tables. A manifest stores the schema and
 chunk index; each chunk stores one typed vector per schema column. Chunks are
 written before the atomically replaced manifest, so a completed append is
-discoverable after reopening. Version 1 has no null values and uses direct
-UTF-8 string vectors rather than dictionary encoding.
+discoverable after reopening. Each column has a packed validity bitmap.
+Strings use per-chunk dictionaries and `u32` code arrays, then decode
+transparently for callers.

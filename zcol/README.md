@@ -29,12 +29,13 @@ MemoryPack manifest contains version, chunk size, schema (`name` plus
 `i64`/`f64`/`bool`/`string` kind), and a chunk index with row counts. Each
 chunk is a MemoryPack object containing one typed vector for every schema
 column. Primitive values use packed arrays. Strings are direct UTF-8
-`memorypack.Str` vectors in v1; dictionary encoding is intentionally deferred
-until cardinality statistics justify the additional format complexity.
+String columns are always dictionary encoded per chunk: unique UTF-8 values are
+stored once and rows store `u32` dictionary codes.
 
-Version 1 has **no null values**. This keeps typed loops tight and makes the
-absence of validity checks explicit rather than silently treating a sentinel
-as null.
+Every column chunk carries a packed validity bitmap. CSV empty fields and the
+literal `NULL` are null. Ordinary comparisons never match null; `IS NULL` and
+`IS NOT NULL` are explicit predicates. Aggregates skip null values, while
+`COUNT(*)` counts rows and `COUNT(column)` counts valid values.
 
 Appends write and sync the chunk first, then write and sync a temporary
 manifest and atomically rename it over the live manifest. Reopening decodes
@@ -48,8 +49,9 @@ as the other repository examples.
 The executor reads one chunk at a time, allocates a boolean selection vector,
 and evaluates each predicate over the relevant typed slice. Projection copies
 only selected values. Aggregates maintain typed-independent numeric state for
-`count`, `sum`, `min`, `max`, and `avg`; grouping uses a hash map keyed by the
-group value. There is no per-row interface dispatch in the scan loops.
+`count`, `sum`, `min`, `max`, and `avg`; grouping uses composite hash keys,
+including null components and dictionary codes. A single-key hash inner join,
+one-key `ORDER BY`, and `LIMIT` are also available.
 
 ## SQL subset
 
@@ -57,7 +59,10 @@ group value. There is no per-row interface dispatch in the scan loops.
 SELECT <column[, ...] | aggregate[, ...]>
 FROM <table>
 [WHERE <column> <op> <literal> [AND ...]]
-[GROUP BY <column>]
+[JOIN <table> ON a.key = b.key]
+[GROUP BY <column>[, ...]]
+[ORDER BY <column> [ASC|DESC]]
+[LIMIT n]
 ```
 
 Operators are `=`, `<`, `<=`, `>`, `>=`, and `!=` for numeric values; string
@@ -86,16 +91,22 @@ Representative ReleaseFast output from this repository:
 
 ```text
 benchmark rows=100000
-  filter+sum columnar: median_ns=165626 rows_per_sec=603769939 bytes_scanned=900000 sum=9375000.00
-  filter+sum row:      median_ns=700888 rows_per_sec=142676147 bytes_scanned=8800000 sum=9375000.00
-  group-by   columnar: median_ns=136957 rows_per_sec=730156180 bytes_scanned=900000 sum=49950000.00
-  group-by   row:      median_ns=659860 rows_per_sec=151547297 bytes_scanned=8800000 sum=49950000.00
+  filter+sum columnar: median_ns=132053 rows_per_sec=757271701 bytes_scanned=900000 sum=9375000.00
+  filter+sum row:      median_ns=238081 rows_per_sec=420025117 bytes_scanned=8800000 sum=9375000.00
+  group-by   columnar: median_ns=56417 rows_per_sec=1772515376 bytes_scanned=900000 sum=49950000.00
+  group-by   row:      median_ns=243975 rows_per_sec=409878061 bytes_scanned=8800000 sum=49950000.00
+  null-sum scalar:     median_ns=43342 sum=42814715.00
+  null-sum SIMD:       median_ns=36222 sum=42814715.00
+  join probe:          median_ns=213057 checksum=100000
+  null-sum scalar:     median_ns=193067 sum=42814715.00
+  null-sum SIMD:       median_ns=171732 sum=42814715.00
 ```
 
-These runs measured 4.23x and 4.82x columnar latency advantages for filter+sum
-and group-by respectively, with 9.8x fewer bytes scanned. Results vary with
-CPU, Zig version, and process load; the benchmark does not claim that columnar
-wins point lookups or every workload.
+These runs measured 1.80x and 4.32x columnar latency advantages for filter+sum
+and group-by respectively, with 9.8x fewer bytes scanned. The SIMD nullable
+sum was 1.20x faster in this run, while the join probe is a simple baseline
+probe rather than a claim about all join workloads. Results vary with CPU,
+Zig version, and process load.
 
 ## CLI and demo
 
@@ -106,17 +117,15 @@ Commands are `create-table`, `load`, `query`, `describe`, `stats`, and
 ./zcol/run.sh
 ```
 
-It creates a two-chunk table, loads CSV, prints filtered and grouped results,
-shows storage statistics, and runs the benchmark with assertions on known
-answers.
+It creates a two-chunk table, loads nullable CSV, prints filtered, null,
+composite-grouped, and joined results, shows storage statistics, and runs the
+benchmark with assertions on known answers.
 
 ## Limitations
 
-- Single local table per query; no joins, subqueries, windows, or distributed
+- Only inner, single-key joins; no subqueries, windows, or distributed
   execution.
 - No transactions or concurrent writer protocol.
-- No null values in v1.
-- Strings use direct values rather than dictionary encoding.
-- Aggregates are numeric and group-by supports one column.
+- One `ORDER BY` key and numeric aggregates.
 - The benchmark is an executable microbenchmark, not a full query optimizer or
   production performance certification.

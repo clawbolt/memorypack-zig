@@ -21,6 +21,12 @@ pub const Report = struct {
     group_row_bytes: usize,
     group_column_sum: f64,
     group_row_sum: f64,
+    null_sum: f64,
+    null_scalar_ns: u64,
+    null_simd_ns: u64,
+    null_simd_sum: f64,
+    join_ns: u64,
+    join_checksum: f64,
 };
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, rows: usize, runs: usize) !Report {
@@ -48,6 +54,23 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, rows: usize, runs: usize) !
     defer allocator.free(group_row_times);
     var group_column_sum: f64 = 0;
     var group_row_sum: f64 = 0;
+    var null_values = try allocator.alloc(f64, rows);
+    defer allocator.free(null_values);
+    var null_validity = try allocator.alloc(bool, rows);
+    defer allocator.free(null_validity);
+    for (0..rows) |index| {
+        null_values[index] = amounts[index];
+        null_validity[index] = index % 7 != 0;
+    }
+    var null_scalar_times = try allocator.alloc(u64, runs);
+    defer allocator.free(null_scalar_times);
+    var null_simd_times = try allocator.alloc(u64, runs);
+    defer allocator.free(null_simd_times);
+    var null_sum: f64 = 0;
+    var null_simd_sum: f64 = 0;
+    var join_times = try allocator.alloc(u64, runs);
+    defer allocator.free(join_times);
+    var join_checksum: f64 = 0;
     for (0..runs) |run_index| {
         const started = std.Io.Clock.awake.now(io).nanoseconds;
         var sum: f64 = 0;
@@ -73,11 +96,45 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, rows: usize, runs: usize) !
         for (records) |record| row_groups[record.team] += record.amount;
         group_row_times[run_index] = @intCast(std.Io.Clock.awake.now(io).nanoseconds - group_row_started);
         group_row_sum = row_groups[0] + row_groups[1] + row_groups[2] + row_groups[3];
+        var null_started = std.Io.Clock.awake.now(io).nanoseconds;
+        var nullable_total: f64 = 0;
+        for (null_values, null_validity) |value, valid| {
+            if (valid) nullable_total += value;
+        }
+        null_scalar_times[run_index] = @intCast(std.Io.Clock.awake.now(io).nanoseconds - null_started);
+        null_sum = nullable_total;
+        null_started = std.Io.Clock.awake.now(io).nanoseconds;
+        var nullable_vector_total: f64 = 0;
+        var vector_index: usize = 0;
+        var lanes: @Vector(4, f64) = @splat(0);
+        while (vector_index + 4 <= null_values.len) : (vector_index += 4) {
+            var values: @Vector(4, f64) = null_values[vector_index..][0..4].*;
+            inline for (0..4) |lane| {
+                if (!null_validity[vector_index + lane]) values[lane] = 0;
+            }
+            lanes += values;
+        }
+        nullable_vector_total = @reduce(.Add, lanes);
+        while (vector_index < null_values.len) : (vector_index += 1) {
+            if (null_validity[vector_index]) nullable_vector_total += null_values[vector_index];
+        }
+        null_simd_sum = nullable_vector_total;
+        null_simd_times[run_index] = @intCast(std.Io.Clock.awake.now(io).nanoseconds - null_started);
+        const join_started = std.Io.Clock.awake.now(io).nanoseconds;
+        var matches: usize = 0;
+        for (records) |record| {
+            if (record.id < @as(i64, @intCast(rows))) matches += 1;
+        }
+        join_checksum = @floatFromInt(matches);
+        join_times[run_index] = @intCast(std.Io.Clock.awake.now(io).nanoseconds - join_started);
     }
     std.mem.sort(u64, column_times, {}, std.sort.asc(u64));
     std.mem.sort(u64, row_times, {}, std.sort.asc(u64));
     std.mem.sort(u64, group_column_times, {}, std.sort.asc(u64));
     std.mem.sort(u64, group_row_times, {}, std.sort.asc(u64));
+    std.mem.sort(u64, null_scalar_times, {}, std.sort.asc(u64));
+    std.mem.sort(u64, null_simd_times, {}, std.sort.asc(u64));
+    std.mem.sort(u64, join_times, {}, std.sort.asc(u64));
     return .{
         .rows = rows,
         .column_ns = column_times[runs / 2],
@@ -92,6 +149,12 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, rows: usize, runs: usize) !
         .group_row_bytes = rows * @sizeOf(Row),
         .group_column_sum = group_column_sum,
         .group_row_sum = group_row_sum,
+        .null_sum = null_sum,
+        .null_scalar_ns = null_scalar_times[runs / 2],
+        .null_simd_ns = null_simd_times[runs / 2],
+        .null_simd_sum = null_simd_sum,
+        .join_ns = join_times[runs / 2],
+        .join_checksum = join_checksum,
     };
 }
 
@@ -99,8 +162,8 @@ pub fn print(report: Report) void {
     const column_rows = if (report.column_ns == 0) 0 else @as(u64, report.rows) * 1_000_000_000 / report.column_ns;
     const row_rows = if (report.row_ns == 0) 0 else @as(u64, report.rows) * 1_000_000_000 / report.row_ns;
     std.debug.print(
-        "benchmark rows={d}\n  filter+sum columnar: median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  filter+sum row:      median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  group-by   columnar: median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  group-by   row:      median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n",
-        .{ report.rows, report.column_ns, column_rows, report.column_bytes, report.column_sum, report.row_ns, row_rows, report.row_bytes, report.row_sum, report.group_column_ns, @as(u64, report.rows) * 1_000_000_000 / report.group_column_ns, report.group_column_bytes, report.group_column_sum, report.group_row_ns, @as(u64, report.rows) * 1_000_000_000 / report.group_row_ns, report.group_row_bytes, report.group_row_sum },
+        "benchmark rows={d}\n  filter+sum columnar: median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  filter+sum row:      median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  group-by   columnar: median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  group-by   row:      median_ns={d} rows_per_sec={d} bytes_scanned={d} sum={d:.2}\n  null-sum scalar:     median_ns={d} sum={d:.2}\n  null-sum SIMD:       median_ns={d} sum={d:.2}\n  join probe:          median_ns={d} checksum={d:.0}\n",
+        .{ report.rows, report.column_ns, column_rows, report.column_bytes, report.column_sum, report.row_ns, row_rows, report.row_bytes, report.row_sum, report.group_column_ns, @as(u64, report.rows) * 1_000_000_000 / report.group_column_ns, report.group_column_bytes, report.group_column_sum, report.group_row_ns, @as(u64, report.rows) * 1_000_000_000 / report.group_row_ns, report.group_row_bytes, report.group_row_sum, report.null_scalar_ns, report.null_sum, report.null_simd_ns, report.null_simd_sum, report.join_ns, report.join_checksum },
     );
 }
 
@@ -109,4 +172,5 @@ test "benchmark paths produce identical aggregates" {
     try std.testing.expectEqual(report.column_sum, report.row_sum);
     try std.testing.expect(report.row_bytes > report.column_bytes);
     try std.testing.expectEqual(report.group_column_sum, report.group_row_sum);
+    try std.testing.expect(report.null_sum > 0);
 }

@@ -231,7 +231,7 @@ pub fn execute(allocator: std.mem.Allocator, table: *storage.Table, query: Query
             }
         }
         if (query.aggregates.len == 0 and query.group_by == null and query.group_by_columns.len == 0) {
-            for (selected, 0..) |keep, row| if (keep) try rows.append(allocator, try projectRow(allocator, chunk.columns, query.projection, row));
+            for (selected, 0..) |keep, row| if (keep) try rows.append(allocator, try projectChunkRow(allocator, chunk, query.projection, row));
         } else if (query.group_by_columns.len > 0 or query.group_by != null) {
             const group_columns = if (query.group_by_columns.len > 0) query.group_by_columns else &[_]usize{query.group_by.?};
             for (selected, 0..) |keep, row| {
@@ -394,6 +394,13 @@ fn projectRow(allocator: std.mem.Allocator, columns: []const storage.Column, pro
     const values = try allocator.alloc(Value, projection.len);
     errdefer allocator.free(values);
     for (projection, 0..) |column, index| values[index] = try columnValue(allocator, columns[column], row);
+    return values;
+}
+
+fn projectChunkRow(allocator: std.mem.Allocator, chunk: storage.Chunk, projection: []const usize, row: usize) !Row {
+    const values = try allocator.alloc(Value, projection.len);
+    errdefer allocator.free(values);
+    for (projection, 0..) |column, index| values[index] = try columnValueAt(allocator, chunk, column, row);
     return values;
 }
 
