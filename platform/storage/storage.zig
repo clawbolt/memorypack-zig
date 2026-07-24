@@ -237,6 +237,10 @@ fn freeRecords(allocator: std.mem.Allocator, records: []KV) void {
     allocator.free(records);
 }
 
+pub fn freeRecordsForExample(allocator: std.mem.Allocator, records: []KV) void {
+    freeRecords(allocator, records);
+}
+
 test "storage WAL recovery and compaction" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;

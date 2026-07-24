@@ -219,7 +219,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(platform_core_tests).step);
-    _ = platform_storage;
     const platform_storage_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("platform/storage/storage.zig"),
@@ -232,4 +231,67 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(platform_storage_tests).step);
+
+    const platform_broker = b.addModule("platform-broker", .{
+        .root_source_file = b.path("platform/broker/broker.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "memorypack", .module = module },
+            .{ .name = "core", .module = platform_core },
+        },
+    });
+    const platform_audit = b.addModule("platform-audit", .{
+        .root_source_file = b.path("platform/audit/audit.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "memorypack", .module = module }},
+    });
+    const platform_services = b.addModule("platform-services", .{
+        .root_source_file = b.path("platform/services/services.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "memorypack", .module = module },
+            .{ .name = "storage", .module = platform_storage },
+            .{ .name = "broker", .module = platform_broker },
+            .{ .name = "audit", .module = platform_audit },
+        },
+    });
+    const platform_broker_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("platform/broker/broker.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "memorypack", .module = module },
+                .{ .name = "core", .module = platform_core },
+            },
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(platform_broker_tests).step);
+    const platform_audit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("platform/audit/audit.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "memorypack", .module = module }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(platform_audit_tests).step);
+    _ = platform_services;
+    const platform_services_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("platform/services/services.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "memorypack", .module = module },
+                .{ .name = "storage", .module = platform_storage },
+                .{ .name = "broker", .module = platform_broker },
+                .{ .name = "audit", .module = platform_audit },
+            },
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(platform_services_tests).step);
 }
