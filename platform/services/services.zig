@@ -85,6 +85,14 @@ pub const Platform = struct {
         platform.alerts_store = try storage.Store.open(io, allocator, .{ .data_dir = alerts_dir });
         platform.broker = try broker.Broker.open(io, allocator, .{ .data_dir = broker_dir });
         platform.audit = try audit.Store.open(io, allocator, .{ .data_dir = audit_dir });
+        const persisted_rules = try platform.rules_store.list();
+        defer storage.freeRecordsForExample(allocator, persisted_rules);
+        for (persisted_rules) |record| {
+            const encoded = try hexDecode(allocator, record.value.bytes);
+            defer allocator.free(encoded);
+            const rule = try memorypack.decode(Rule, allocator, encoded);
+            try platform.rules.append(allocator, rule);
+        }
         return platform;
     }
 

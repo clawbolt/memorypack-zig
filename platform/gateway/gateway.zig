@@ -91,6 +91,7 @@ pub const Gateway = struct {
         };
         errdefer gateway.deinit();
         for (config.api_tokens) |_| try gateway.token_calls.append(allocator, 0);
+        _ = try gateway.platform.processAlerts(1000);
         return gateway;
     }
 
