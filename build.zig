@@ -374,5 +374,28 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(zcol_exec_tests).step);
-    _ = zcol_exec;
+    const zcol_sql = b.addModule("zcol-sql", .{
+        .root_source_file = b.path("zcol/sql/sql.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "memorypack", .module = module },
+            .{ .name = "storage", .module = zcol_storage },
+            .{ .name = "exec", .module = zcol_exec },
+        },
+    });
+    const zcol_sql_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zcol/sql/sql.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "memorypack", .module = module },
+                .{ .name = "storage", .module = zcol_storage },
+                .{ .name = "exec", .module = zcol_exec },
+            },
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(zcol_sql_tests).step);
+    _ = zcol_sql;
 }
