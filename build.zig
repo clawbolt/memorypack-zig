@@ -194,4 +194,42 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(audit_tests).step);
+
+    const platform_core = b.addModule("platform-core", .{
+        .root_source_file = b.path("platform/core/core.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "memorypack", .module = module }},
+    });
+    const platform_storage = b.addModule("platform-storage", .{
+        .root_source_file = b.path("platform/storage/storage.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "memorypack", .module = module },
+            .{ .name = "core", .module = platform_core },
+        },
+    });
+    const platform_core_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("platform/core/core.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "memorypack", .module = module }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(platform_core_tests).step);
+    _ = platform_storage;
+    const platform_storage_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("platform/storage/storage.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "memorypack", .module = module },
+                .{ .name = "core", .module = platform_core },
+            },
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(platform_storage_tests).step);
 }
