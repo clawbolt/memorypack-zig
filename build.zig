@@ -32,7 +32,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    b.step("test", "Run memorypack tests").dependOn(&b.addRunArtifact(tests).step);
+    const test_step = b.step("test", "Run memorypack tests");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
 
     const bench = b.addExecutable(.{
         .name = "memorypack-bench",
@@ -97,4 +98,36 @@ pub fn build(b: *std.Build) void {
     const run_event_log = b.addRunArtifact(event_log);
     if (b.args) |args| run_event_log.addArgs(args);
     b.step("event-log", "Run the pure-Zig append-only event log").dependOn(&run_event_log.step);
+
+    const zdb_module = b.addModule("zdb", .{
+        .root_source_file = b.path("examples/zdb/zdb.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "memorypack", .module = module }},
+    });
+    const zdb_cli = b.addExecutable(.{
+        .name = "zdb",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/zdb/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "memorypack", .module = module },
+                .{ .name = "zdb", .module = zdb_module },
+            },
+        }),
+    });
+    const run_zdb = b.addRunArtifact(zdb_cli);
+    if (b.args) |args| run_zdb.addArgs(args);
+    b.step("zdb", "Run the pure-Zig embedded document database").dependOn(&run_zdb.step);
+
+    const zdb_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/zdb/zdb.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "memorypack", .module = module }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(zdb_tests).step);
 }

@@ -391,3 +391,8 @@ persistent command-line task manager whose store is encoded with MemoryPack.
 For a streaming/event-sourcing example, see
 [`examples/event-log/README.md`](examples/event-log/README.md). It appends
 framed MemoryPack events and rebuilds a bank ledger by replaying the log.
+
+For a larger embedded-database example, see
+[`examples/zdb/README.md`](examples/zdb/README.md). It combines a MemoryPack
+snapshot, durable framed WAL, crash recovery, compaction, secondary indexing,
+and version-tolerant documents.
