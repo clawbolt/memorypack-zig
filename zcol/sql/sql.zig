@@ -13,6 +13,7 @@ pub const ParseError = error{
     InvalidOperator,
     InvalidLiteral,
     InvalidGroupBy,
+    InvalidLimit,
     TrailingTokens,
 } || std.mem.Allocator.Error;
 
@@ -35,6 +36,13 @@ pub const Plan = struct {
     select: []SelectItem,
     predicates: []Predicate,
     group_by: ?memorypack.Str,
+    group_by_columns: []memorypack.Str,
+    order_by: ?memorypack.Str,
+    order_desc: bool,
+    limit: ?usize,
+    join_table: ?memorypack.Str = null,
+    join_left: ?memorypack.Str = null,
+    join_right: ?memorypack.Str = null,
 
     pub fn deinit(self: *Plan) void {
         self.allocator.free(self.table.bytes);
@@ -51,10 +59,17 @@ pub const Plan = struct {
         }
         self.allocator.free(self.predicates);
         if (self.group_by) |group| self.allocator.free(group.bytes);
+        for (self.group_by_columns) |group| self.allocator.free(group.bytes);
+        self.allocator.free(self.group_by_columns);
+        if (self.order_by) |order| self.allocator.free(order.bytes);
+        if (self.join_table) |join| self.allocator.free(join.bytes);
+        if (self.join_left) |join| self.allocator.free(join.bytes);
+        if (self.join_right) |join| self.allocator.free(join.bytes);
     }
 };
 
 pub fn parse(allocator: std.mem.Allocator, text: []const u8) ParseError!Plan {
+    if (std.mem.indexOf(u8, text, " JOIN ") != null) return parseJoin(allocator, text);
     var tokens = std.mem.tokenizeAny(u8, text, " \t\r\n");
     const first = tokens.next() orelse return error.EmptyQuery;
     if (!std.ascii.eqlIgnoreCase(first, "SELECT")) return error.ExpectedSelect;
@@ -70,7 +85,15 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) ParseError!Plan {
     const table = tokens.next() orelse return error.MissingTable;
     var predicates: std.ArrayList(Predicate) = .empty;
     errdefer freePredicateList(allocator, &predicates);
-    var group_by: ?memorypack.Str = null;
+    const group_by: ?memorypack.Str = null;
+    var group_columns: std.ArrayList(memorypack.Str) = .empty;
+    var order_by: ?memorypack.Str = null;
+    var order_desc = false;
+    var limit: ?usize = null;
+    errdefer {
+        for (group_columns.items) |group| allocator.free(group.bytes);
+        group_columns.deinit(allocator);
+    }
     if (tokens.next()) |keyword| {
         if (std.ascii.eqlIgnoreCase(keyword, "WHERE")) {
             while (true) {
@@ -107,8 +130,10 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) ParseError!Plan {
                     const by = tokens.next() orelse return error.InvalidGroupBy;
                     if (!std.ascii.eqlIgnoreCase(by, "BY")) return error.InvalidGroupBy;
                     const group = tokens.next() orelse return error.InvalidGroupBy;
-                    group_by = .{ .bytes = try allocator.dupe(u8, stripComma(group)) };
-                    if (tokens.next() != null) return error.TrailingTokens;
+                    try group_columns.append(allocator, .{ .bytes = try allocator.dupe(u8, stripComma(group)) });
+                    while (tokens.next()) |extra| {
+                        try group_columns.append(allocator, .{ .bytes = try allocator.dupe(u8, stripComma(extra)) });
+                    }
                     break;
                 }
             }
@@ -116,8 +141,20 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) ParseError!Plan {
             const by = tokens.next() orelse return error.InvalidGroupBy;
             if (!std.ascii.eqlIgnoreCase(by, "BY")) return error.InvalidGroupBy;
             const group = tokens.next() orelse return error.InvalidGroupBy;
-            group_by = .{ .bytes = try allocator.dupe(u8, stripComma(group)) };
-            if (tokens.next() != null) return error.TrailingTokens;
+            try group_columns.append(allocator, .{ .bytes = try allocator.dupe(u8, stripComma(group)) });
+            while (tokens.next()) |extra| try group_columns.append(allocator, .{ .bytes = try allocator.dupe(u8, stripComma(extra)) });
+        } else if (std.ascii.eqlIgnoreCase(keyword, "ORDER")) {
+            const by = tokens.next() orelse return error.TrailingTokens;
+            if (!std.ascii.eqlIgnoreCase(by, "BY")) return error.TrailingTokens;
+            const column = tokens.next() orelse return error.TrailingTokens;
+            order_by = .{ .bytes = try allocator.dupe(u8, stripComma(column)) };
+            if (tokens.next()) |direction| {
+                if (std.ascii.eqlIgnoreCase(direction, "DESC")) order_desc = true else if (!std.ascii.eqlIgnoreCase(direction, "ASC")) return error.TrailingTokens;
+            }
+            if (tokens.next()) |limit_keyword| {
+                if (!std.ascii.eqlIgnoreCase(limit_keyword, "LIMIT")) return error.TrailingTokens;
+                limit = std.fmt.parseInt(usize, tokens.next() orelse return error.TrailingTokens, 10) catch return error.InvalidLimit;
+            }
         } else return error.TrailingTokens;
     }
     return .{
@@ -126,6 +163,58 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) ParseError!Plan {
         .select = try select.toOwnedSlice(allocator),
         .predicates = try predicates.toOwnedSlice(allocator),
         .group_by = group_by,
+        .group_by_columns = try group_columns.toOwnedSlice(allocator),
+        .order_by = order_by,
+        .order_desc = order_desc,
+        .limit = limit,
+    };
+}
+
+fn parseJoin(allocator: std.mem.Allocator, text: []const u8) ParseError!Plan {
+    var tokens = std.mem.tokenizeAny(u8, text, " \t\r\n");
+    if (!std.ascii.eqlIgnoreCase(tokens.next() orelse return error.EmptyQuery, "SELECT")) return error.ExpectedSelect;
+    var select: std.ArrayList(SelectItem) = .empty;
+    errdefer freeSelectList(allocator, &select);
+    var token = tokens.next() orelse return error.ExpectedFrom;
+    while (!std.ascii.eqlIgnoreCase(stripComma(token), "FROM")) {
+        try select.append(allocator, try parseSelectItem(allocator, stripComma(token)));
+        token = tokens.next() orelse return error.ExpectedFrom;
+    }
+    const table = tokens.next() orelse return error.MissingTable;
+    if (!std.ascii.eqlIgnoreCase(tokens.next() orelse return error.TrailingTokens, "JOIN")) return error.TrailingTokens;
+    const join_table = tokens.next() orelse return error.MissingTable;
+    if (!std.ascii.eqlIgnoreCase(tokens.next() orelse return error.TrailingTokens, "ON")) return error.TrailingTokens;
+    const join_left = tokens.next() orelse return error.InvalidPredicate;
+    if (!std.mem.eql(u8, tokens.next() orelse return error.InvalidOperator, "=")) return error.InvalidOperator;
+    const join_right = tokens.next() orelse return error.InvalidPredicate;
+    var order_by: ?memorypack.Str = null;
+    var order_desc = false;
+    var limit: ?usize = null;
+    if (tokens.next()) |keyword| {
+        if (!std.ascii.eqlIgnoreCase(keyword, "ORDER")) return error.TrailingTokens;
+        if (!std.ascii.eqlIgnoreCase(tokens.next() orelse return error.TrailingTokens, "BY")) return error.TrailingTokens;
+        order_by = .{ .bytes = try allocator.dupe(u8, stripComma(tokens.next() orelse return error.TrailingTokens)) };
+        if (tokens.next()) |direction| {
+            if (std.ascii.eqlIgnoreCase(direction, "DESC")) order_desc = true else if (!std.ascii.eqlIgnoreCase(direction, "ASC")) return error.TrailingTokens;
+        }
+        if (tokens.next()) |limit_keyword| {
+            if (!std.ascii.eqlIgnoreCase(limit_keyword, "LIMIT")) return error.TrailingTokens;
+            limit = std.fmt.parseInt(usize, tokens.next() orelse return error.TrailingTokens, 10) catch return error.InvalidLimit;
+        }
+    }
+    return .{
+        .allocator = allocator,
+        .table = .{ .bytes = try allocator.dupe(u8, table) },
+        .select = try select.toOwnedSlice(allocator),
+        .predicates = try allocator.alloc(Predicate, 0),
+        .group_by = null,
+        .group_by_columns = try allocator.alloc(memorypack.Str, 0),
+        .order_by = order_by,
+        .order_desc = order_desc,
+        .limit = limit,
+        .join_table = .{ .bytes = try allocator.dupe(u8, join_table) },
+        .join_left = .{ .bytes = try allocator.dupe(u8, join_left) },
+        .join_right = .{ .bytes = try allocator.dupe(u8, join_right) },
     };
 }
 
@@ -148,11 +237,19 @@ pub fn bind(allocator: std.mem.Allocator, plan: *const Plan, schema: []const sto
         try predicates.append(allocator, .{ .column = column, .op = predicate.op, .value = if (predicate.null_check != null) .{ .null = {} } else try parseScalar(allocator, schema[column].kind, predicate.literal.bytes), .null_check = predicate.null_check });
     }
     const group_by = if (plan.group_by) |group| findColumn(schema, group.bytes) orelse return error.ColumnNotFound else null;
+    var group_columns: std.ArrayList(usize) = .empty;
+    errdefer group_columns.deinit(allocator);
+    for (plan.group_by_columns) |group| try group_columns.append(allocator, findColumn(schema, group.bytes) orelse return error.ColumnNotFound);
+    const order_by = if (plan.order_by) |order| findColumn(schema, order.bytes) orelse return error.ColumnNotFound else null;
     return .{
         .projection = try projection.toOwnedSlice(allocator),
         .predicates = try predicates.toOwnedSlice(allocator),
         .aggregates = try aggregates.toOwnedSlice(allocator),
         .group_by = group_by,
+        .group_by_columns = try group_columns.toOwnedSlice(allocator),
+        .order_by = order_by,
+        .order_desc = plan.order_desc,
+        .limit = plan.limit,
     };
 }
 
@@ -161,6 +258,7 @@ pub fn freeQuery(allocator: std.mem.Allocator, query: *exec.Query) void {
     for (query.predicates) |predicate| freeScalar(allocator, predicate.value);
     allocator.free(query.predicates);
     allocator.free(query.aggregates);
+    allocator.free(query.group_by_columns);
 }
 
 fn parseSelectItem(allocator: std.mem.Allocator, token: []const u8) !SelectItem {
@@ -249,10 +347,22 @@ test "sql parser binds filters and aggregates" {
     defer freeQuery(allocator, &query);
     try std.testing.expectEqual(@as(usize, 1), query.predicates.len);
     try std.testing.expectEqual(@as(usize, 1), query.aggregates.len);
-    try std.testing.expectEqual(@as(usize, 1), query.group_by.?);
+    try std.testing.expectEqual(@as(usize, 1), query.group_by_columns[0]);
 }
 
 test "sql parser rejects malformed input" {
     try std.testing.expectError(error.ExpectedSelect, parse(std.testing.allocator, "DELETE FROM sales"));
     try std.testing.expectError(error.InvalidOperator, parse(std.testing.allocator, "SELECT amount FROM sales WHERE amount ~~ 2"));
+}
+
+test "sql parser accepts null checks and ordering" {
+    var plan = try parse(std.testing.allocator, "SELECT amount FROM sales ORDER BY amount DESC LIMIT 2");
+    defer plan.deinit();
+    var null_plan = try parse(std.testing.allocator, "SELECT amount FROM sales WHERE amount IS NOT NULL");
+    defer null_plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), null_plan.predicates.len);
+    try std.testing.expectEqual(false, null_plan.predicates[0].null_check.?);
+    try std.testing.expectEqualStrings("amount", plan.order_by.?.bytes);
+    try std.testing.expect(plan.order_desc);
+    try std.testing.expectEqual(@as(usize, 2), plan.limit.?);
 }

@@ -6,6 +6,7 @@ const sql = @import("sql");
 const bench = @import("bench");
 
 const InputValue = union(enum) {
+    null: void,
     i64: i64,
     f64: f64,
     bool: bool,
@@ -82,6 +83,7 @@ fn query(init: std.process.Init, allocator: std.mem.Allocator, args: *std.proces
     defer table.deinit();
     var plan = try sql.parse(allocator, text);
     defer plan.deinit();
+    if (plan.join_table != null) return joinQuery(init, allocator, dir, &plan);
     const schema = try table.getSchema();
     var physical = try sql.bind(allocator, &plan, schema);
     defer sql.freeQuery(allocator, &physical);
@@ -97,6 +99,55 @@ fn query(init: std.process.Init, allocator: std.mem.Allocator, args: *std.proces
         std.debug.print("\n", .{});
     }
     std.debug.print("rows={d}\n", .{result.rows.len});
+}
+
+fn joinQuery(init: std.process.Init, allocator: std.mem.Allocator, left_dir: []const u8, plan: *const sql.Plan) !void {
+    const right_dir = plan.join_table.?.bytes;
+    var left = try storage.Table.open(init.io, allocator, left_dir);
+    defer left.deinit();
+    var right = try storage.Table.open(init.io, allocator, right_dir);
+    defer right.deinit();
+    const left_schema = try left.getSchema();
+    const right_schema = try right.getSchema();
+    const left_key = try resolveQualified(left_schema, right_schema, plan.join_left.?.bytes);
+    const right_key = try resolveQualified(right_schema, left_schema, plan.join_right.?.bytes);
+    var projections = try allocator.alloc(exec.JoinProjection, plan.select.len);
+    defer allocator.free(projections);
+    for (plan.select, 0..) |item, index| {
+        const column = item.column;
+        const qualified = std.mem.indexOfScalar(u8, column.bytes, '.') != null;
+        const is_right = qualified and (std.mem.startsWith(u8, column.bytes, "right.") or std.mem.startsWith(u8, column.bytes, "b."));
+        const schema = if (is_right) right_schema else left_schema;
+        const name = if (qualified) column.bytes[std.mem.indexOfScalar(u8, column.bytes, '.').? + 1 ..] else column.bytes;
+        const column_index = findSchemaColumn(schema, name) orelse return error.ColumnNotFound;
+        projections[index] = .{ .left = !is_right, .column = column_index, .name = .{ .bytes = column.bytes } };
+    }
+    const order = if (plan.order_by) |order_column| findProjection(projections, order_column.bytes) else null;
+    var result = try exec.executeJoin(allocator, &left, &right, .{ .left_key = left_key, .right_key = right_key, .projection = projections, .order_by = order, .order_desc = plan.order_desc, .limit = plan.limit });
+    defer result.deinit();
+    for (result.columns) |column| std.debug.print("{s}\t", .{column.bytes});
+    std.debug.print("\n", .{});
+    for (result.rows) |row| {
+        for (row) |value| {
+            printValue(value);
+            std.debug.print("\t", .{});
+        }
+        std.debug.print("\n", .{});
+    }
+}
+
+fn resolveQualified(primary: []const storage.ColumnSchema, secondary: []const storage.ColumnSchema, name: []const u8) !usize {
+    const dot = std.mem.indexOfScalar(u8, name, '.') orelse return error.InvalidInput;
+    const column = name[dot + 1 ..];
+    return findSchemaColumn(primary, column) orelse findSchemaColumn(secondary, column) orelse error.ColumnNotFound;
+}
+fn findSchemaColumn(schema: []const storage.ColumnSchema, name: []const u8) ?usize {
+    for (schema, 0..) |column, index| if (std.ascii.eqlIgnoreCase(column.name.bytes, name)) return index;
+    return null;
+}
+fn findProjection(projections: []const exec.JoinProjection, name: []const u8) ?usize {
+    for (projections, 0..) |projection, index| if (std.ascii.eqlIgnoreCase(projection.name.bytes, name) or std.ascii.eqlIgnoreCase(projection.name.bytes, name[name.len - @min(name.len, projection.name.bytes.len) ..])) return index;
+    return null;
 }
 
 fn describe(init: std.process.Init, allocator: std.mem.Allocator, args: *std.process.Args.Iterator) !void {
@@ -203,6 +254,10 @@ fn parseRow(allocator: std.mem.Allocator, schema: []const storage.ColumnSchema, 
     var fields = std.mem.splitScalar(u8, line, ',');
     for (schema, 0..) |column, index| {
         const field = fields.next() orelse return error.InvalidRow;
+        if (field.len == 0 or std.ascii.eqlIgnoreCase(field, "NULL")) {
+            values[index] = .{ .null = {} };
+            continue;
+        }
         values[index] = switch (column.kind) {
             .i64 => .{ .i64 = std.fmt.parseInt(i64, field, 10) catch return error.InvalidRow },
             .f64 => .{ .f64 = std.fmt.parseFloat(f64, field) catch return error.InvalidRow },
@@ -216,37 +271,48 @@ fn parseRow(allocator: std.mem.Allocator, schema: []const storage.ColumnSchema, 
 fn flushRows(allocator: std.mem.Allocator, table: *storage.Table, schema: []const storage.ColumnSchema, rows: []const []InputValue) !void {
     var columns = try allocator.alloc(storage.Column, schema.len);
     defer allocator.free(columns);
+    var validity = try allocator.alloc([]u8, schema.len);
+    defer {
+        for (validity) |bitmap| allocator.free(bitmap);
+        allocator.free(validity);
+    }
     for (schema, 0..) |column, index| {
+        validity[index] = try allocator.alloc(u8, (rows.len + 7) / 8);
+        @memset(validity[index], 0);
+        for (rows, 0..) |row, row_index| {
+            if (row[index] != .null) validity[index][row_index / 8] |= @as(u8, 1) << @intCast(row_index % 8);
+        }
         switch (column.kind) {
             .i64 => {
                 var values = try allocator.alloc(i64, rows.len);
-                for (rows, 0..) |row, row_index| values[row_index] = row[index].i64;
+                for (rows, 0..) |row, row_index| values[row_index] = if (row[index] == .null) 0 else row[index].i64;
                 columns[index] = .{ .i64 = values };
             },
             .f64 => {
                 var values = try allocator.alloc(f64, rows.len);
-                for (rows, 0..) |row, row_index| values[row_index] = row[index].f64;
+                for (rows, 0..) |row, row_index| values[row_index] = if (row[index] == .null) 0 else row[index].f64;
                 columns[index] = .{ .f64 = values };
             },
             .bool => {
                 var values = try allocator.alloc(bool, rows.len);
-                for (rows, 0..) |row, row_index| values[row_index] = row[index].bool;
+                for (rows, 0..) |row, row_index| values[row_index] = if (row[index] == .null) false else row[index].bool;
                 columns[index] = .{ .bool = values };
             },
             .string => {
                 var values = try allocator.alloc(memorypack.Str, rows.len);
-                for (rows, 0..) |row, row_index| values[row_index] = .{ .bytes = row[index].string };
+                for (rows, 0..) |row, row_index| values[row_index] = .{ .bytes = if (row[index] == .null) "" else row[index].string };
                 columns[index] = .{ .string = values };
             },
         }
     }
     errdefer freeColumns(allocator, columns);
-    _ = try table.appendChunk(columns);
+    _ = try table.appendChunkWithValidity(columns, validity);
     freeColumns(allocator, columns);
 }
 
 fn printValue(value: exec.Value) void {
     switch (value) {
+        .null => std.debug.print("NULL", .{}),
         .i64 => |number| std.debug.print("{d}", .{number}),
         .f64 => |number| std.debug.print("{d:.2}", .{number}),
         .bool => |flag_value| std.debug.print("{}", .{flag_value}),
