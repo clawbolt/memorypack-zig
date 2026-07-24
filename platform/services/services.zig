@@ -111,7 +111,9 @@ pub const Platform = struct {
     pub fn registerDevice(self: *Platform, device: Device) !void {
         const bytes = try memorypack.encode(self.allocator, device);
         defer self.allocator.free(bytes);
-        try self.devices.put(device.id.bytes, &bytes);
+        const encoded = try hexEncode(self.allocator, bytes);
+        defer self.allocator.free(encoded);
+        try self.devices.put(device.id.bytes, encoded);
         _ = try self.audit.append("operator", "device.register", device.id.bytes);
     }
 
@@ -265,6 +267,7 @@ test "services ingest and alert flow" {
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     var platform = try Platform.open(io, allocator, dir);
     defer platform.deinit();
+    try platform.registerDevice(.{ .id = .{ .bytes = "d1" }, .name = .{ .bytes = "Kitchen" }, .kind = .sensor, .status = .active, .tags = &.{}, .registered_at = 1 });
     try platform.addRule(.{ .id = .{ .bytes = "hot" }, .device_id = .{ .bytes = "d1" }, .metric = .{ .bytes = "temp" }, .op = .gt, .threshold = 20 });
     try platform.ingest(.{ .device_id = .{ .bytes = "d1" }, .metric = .{ .bytes = "temp" }, .value = 25, .timestamp = 1 });
     try std.testing.expectEqual(@as(usize, 1), try platform.processAlerts(10));
