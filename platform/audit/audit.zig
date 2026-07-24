@@ -101,7 +101,7 @@ pub const Store = struct {
         try writer.interface.writeAll(&header);
         try writer.interface.writeAll(payload);
         try writer.interface.flush();
-        if (self.entries.items.len > 0) try file.sync(self.io);
+        try file.sync(self.io);
         try self.entries.append(self.allocator, entry);
         return entry.seq;
     }
