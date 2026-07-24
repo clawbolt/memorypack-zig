@@ -130,4 +130,36 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(zdb_tests).step);
+
+    const mq_module = b.addModule("mq", .{
+        .root_source_file = b.path("examples/mq/mq.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "memorypack", .module = module }},
+    });
+    const mq_cli = b.addExecutable(.{
+        .name = "mq",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/mq/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "memorypack", .module = module },
+                .{ .name = "mq", .module = mq_module },
+            },
+        }),
+    });
+    const run_mq = b.addRunArtifact(mq_cli);
+    if (b.args) |args| run_mq.addArgs(args);
+    b.step("mq", "Run the pure-Zig durable message broker").dependOn(&run_mq.step);
+
+    const mq_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/mq/mq.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "memorypack", .module = module }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(mq_tests).step);
 }

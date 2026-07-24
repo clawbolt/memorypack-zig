@@ -384,3 +384,7 @@ MemoryPack 事件，并通过重放日志重建银行账本状态。
 更完整的生产导向嵌入式数据库示例见
 [`examples/zdb/README.md`](examples/zdb/README.md)。它结合了带 CRC 校验的
 MemoryPack WAL、崩溃安全快照、恢复、压缩、二级索引、分页、并发和 TCP 服务。
+
+企业消息队列示例见
+[`examples/mq/README.md`](examples/mq/README.md)。它提供持久化 MemoryPack
+主题日志、CRC 校验恢复、消费者组偏移、至少一次投递和带帧 TCP 协议。

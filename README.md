@@ -396,3 +396,8 @@ For a production-oriented embedded-database example, see
 [`examples/zdb/README.md`](examples/zdb/README.md). It combines a CRC-protected
 MemoryPack WAL, crash-safe snapshots, recovery, compaction, secondary
 indexing, pagination, concurrency, and a framed TCP service.
+
+For the enterprise messaging showcase, see
+[`examples/mq/README.md`](examples/mq/README.md). It provides durable
+MemoryPack topic logs, CRC-checked recovery, consumer-group offsets,
+at-least-once delivery, and a framed TCP broker protocol.
