@@ -381,6 +381,6 @@ C# MemoryPack RPC 服务器和 Zig 客户端，并使用显式长度前缀分帧
 [`examples/event-log/README.md`](examples/event-log/README.md)。它追加带帧的
 MemoryPack 事件，并通过重放日志重建银行账本状态。
 
-更完整的嵌入式数据库示例见
-[`examples/zdb/README.md`](examples/zdb/README.md)。它结合了 MemoryPack 快照、
-持久化带帧 WAL、崩溃恢复、压缩、二级索引和版本容错文档。
+更完整的生产导向嵌入式数据库示例见
+[`examples/zdb/README.md`](examples/zdb/README.md)。它结合了带 CRC 校验的
+MemoryPack WAL、崩溃安全快照、恢复、压缩、二级索引、分页、并发和 TCP 服务。

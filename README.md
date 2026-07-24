@@ -392,7 +392,7 @@ For a streaming/event-sourcing example, see
 [`examples/event-log/README.md`](examples/event-log/README.md). It appends
 framed MemoryPack events and rebuilds a bank ledger by replaying the log.
 
-For a larger embedded-database example, see
-[`examples/zdb/README.md`](examples/zdb/README.md). It combines a MemoryPack
-snapshot, durable framed WAL, crash recovery, compaction, secondary indexing,
-and version-tolerant documents.
+For a production-oriented embedded-database example, see
+[`examples/zdb/README.md`](examples/zdb/README.md). It combines a CRC-protected
+MemoryPack WAL, crash-safe snapshots, recovery, compaction, secondary
+indexing, pagination, concurrency, and a framed TCP service.

@@ -3,8 +3,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STORE="$(mktemp -d "${TMPDIR:-/tmp}/memorypack-zdb.XXXXXX")"
+PORT="${1:-39231}"
 export PATH="$HOME/.dotnet:$HOME/.bin:$HOME/.local/bin:$HOME/.asdf/shims:$PATH"
-trap 'rm -rf "$STORE"' EXIT
+server_pid=""
+cleanup() {
+  if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
+  rm -rf "$STORE"
+}
+trap cleanup EXIT
 
 run_zdb() {
   (cd "$ROOT" && zig build zdb -- "$STORE" "$@")
@@ -19,6 +28,25 @@ echo
 echo "--- state recovered from snapshot + WAL ---"
 run_zdb stats
 run_zdb list
+
+echo
+echo "=== Network server/client round-trip ==="
+SERVER_LOG="$STORE/server.log"
+(cd "$ROOT" && zig build zdb -- "$STORE" serve --port "$PORT") >"$SERVER_LOG" 2>&1 &
+server_pid=$!
+for _ in {1..100}; do
+  if ss -ltn | awk '{print $4}' | grep -Eq "(^|:)${PORT}$"; then break; fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then cat "$SERVER_LOG"; exit 1; fi
+  sleep 0.05
+done
+if ! ss -ltn | awk '{print $4}' | grep -Eq "(^|:)${PORT}$"; then
+  cat "$SERVER_LOG"
+  echo "zdb server did not become ready" >&2
+  exit 1
+fi
+(cd "$ROOT" && zig build zdb -- "$STORE" client --port "$PORT")
+wait "$server_pid"
+server_pid=""
 
 echo
 echo "=== Indexed queries ==="
