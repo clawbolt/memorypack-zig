@@ -411,3 +411,7 @@ The flagship full-system showcase is [`iothub/README.md`](iothub/README.md):
 a modular pure-Zig IoT telemetry hub combining durable storage, an
 at-least-once event broker, alerting services, audit evidence, and an
 authenticated/rate-limited MemoryPack gateway.
+
+For the columnar analytics/OLAP showcase, see [`zcol/README.md`](zcol/README.md):
+it provides MemoryPack-backed column chunks, vectorized execution, a small SQL
+subset, a CLI, and an honest columnar-versus-row benchmark.
