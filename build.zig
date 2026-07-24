@@ -58,4 +58,17 @@ pub fn build(b: *std.Build) void {
     const run_player_profile = b.addRunArtifact(player_profile);
     if (b.args) |args| run_player_profile.addArgs(args);
     b.step("example", "Run the player profile interop example").dependOn(&run_player_profile.step);
+
+    const rpc_client = b.addExecutable(.{
+        .name = "rpc-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/rpc-socket/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "memorypack", .module = module }},
+        }),
+    });
+    const run_rpc_client = b.addRunArtifact(rpc_client);
+    if (b.args) |args| run_rpc_client.addArgs(args);
+    b.step("rpc-client", "Run the Zig RPC socket client").dependOn(&run_rpc_client.step);
 }

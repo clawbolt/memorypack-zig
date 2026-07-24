@@ -378,3 +378,8 @@ Zig workflow using real MemoryPack 1.21.3:
 It covers objects, enums, a nullable application-defined value, arrays, and a tagged event
 union without relying on unordered collection ordering. See
 [`examples/player-profile/README.md`](examples/player-profile/README.md).
+
+For a live TCP example, see
+[`examples/rpc-socket/README.md`](examples/rpc-socket/README.md). It runs a
+real C# MemoryPack RPC server and a Zig client with explicit length-prefix
+framing.

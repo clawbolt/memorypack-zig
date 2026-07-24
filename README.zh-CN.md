@@ -368,3 +368,7 @@ zig fmt --check src build.zig
 示例覆盖对象、枚举、可空的应用自定义值、数组和带标签的事件 union，同时不依赖
 无序集合的枚举顺序。详见
 [`examples/player-profile/README.md`](examples/player-profile/README.md)。
+
+实时 TCP 示例见
+[`examples/rpc-socket/README.md`](examples/rpc-socket/README.md)。它运行真实的
+C# MemoryPack RPC 服务器和 Zig 客户端，并使用显式长度前缀分帧。
